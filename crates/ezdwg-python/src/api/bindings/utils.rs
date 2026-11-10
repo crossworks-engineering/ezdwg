@@ -145,7 +145,8 @@ fn decode_attrib_like_entities_by_type<F>(
     limit: Option<usize>,
     type_code: u16,
     type_name: &str,
-    mut decode_entity: F,
+    is_attdef: bool,
+    mut decode_fallback: F,
 ) -> PyResult<Vec<AttribEntityRow>>
 where
     F: FnMut(
@@ -192,7 +193,19 @@ where
             }
             return Err(to_py_err(err));
         }
-        let entity = match decode_entity(&mut reader, decoder.version(), &header, obj.handle.0) {
+        let exact = decode_attrib_exact_for_version(
+            &mut reader,
+            decoder.version(),
+            &header,
+            obj.handle.0,
+            is_attdef,
+        );
+        let read_exact = exact.is_some();
+        let decoded = match exact {
+            Some(entity) => Ok(entity),
+            None => decode_fallback(&mut reader, decoder.version(), &header, obj.handle.0),
+        };
+        let entity = match decoded {
             Ok(entity) => entity,
             Err(err) if best_effort => {
                 if debug_decode {
@@ -209,7 +222,7 @@ where
             }
             Err(err) => return Err(to_py_err(err)),
         };
-        if best_effort && !is_plausible_attrib_entity(&entity) {
+        if !keeps_attrib_entity(&entity, read_exact, best_effort) {
             if debug_decode {
                 eprintln!(
                     "[attrib-decode] type={} handle={} rejected=implausible-values text={:?} tag={:?} prompt={:?} ins=({:.6e},{:.6e},{:.6e}) align={:?} ext=({:.6e},{:.6e},{:.6e}) h={:.6e} rot={:.6e} width={:.6e} gen={} halign={} valign={} flags={} lock={} layer={} style={:?} owner={:?}",
@@ -275,6 +288,24 @@ where
 
 fn is_plausible_attrib_entity(entity: &entities::AttribEntity) -> bool {
     crate::entities::attrib::is_plausible_attrib_entity(entity)
+}
+
+/// Whether a decoded ATTRIB/ATTDEF is returned.
+///
+/// The plausibility check guards the candidate search: a guessed offset can
+/// give a record of noise, and best-effort reading drops it. A record read at
+/// its exact layout (`decode_attrib_exact`) is what the file holds: its data
+/// ends exactly where its strings begin, and it has a tag, a finite position
+/// and a positive height. Its value is kept as it is, also when the check
+/// would call it noise: a symbol on its own ("\u{00B0}"), a character of a
+/// symbol font in the private use area, a C1 control character, or a very
+/// small text height.
+fn keeps_attrib_entity(
+    entity: &entities::AttribEntity,
+    read_exact: bool,
+    best_effort: bool,
+) -> bool {
+    read_exact || !best_effort || is_plausible_attrib_entity(entity)
 }
 
 fn decode_dim_entities_by_type<F>(
@@ -1415,7 +1446,9 @@ fn is_known_entity_type_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_plausible_attrib_entity, resolve_r2010_string_stream_ranges};
+    use super::{
+        is_plausible_attrib_entity, keeps_attrib_entity, resolve_r2010_string_stream_ranges,
+    };
     use crate::bit::BitReader;
     use crate::entities::AttribEntity;
 
@@ -1510,5 +1543,34 @@ mod tests {
     #[test]
     fn is_plausible_attrib_entity_accepts_normal_text_size() {
         assert!(is_plausible_attrib_entity(&attrib_entity_with_size(2.5, 1.0)));
+    }
+
+    fn attrib_entity_with_text(text: &str) -> AttribEntity {
+        let mut entity = attrib_entity_with_size(2.5, 1.0);
+        entity.text = text.to_string();
+        entity
+    }
+
+    #[test]
+    fn keeps_attrib_entity_keeps_an_exact_read_the_check_calls_noise() {
+        let noise = [
+            attrib_entity_with_text("\u{00B0}"),
+            attrib_entity_with_text("\u{E000}B"),
+            attrib_entity_with_text("A\u{0085}"),
+            attrib_entity_with_size(1.0e-9, 1.0),
+        ];
+        for entity in &noise {
+            assert!(!is_plausible_attrib_entity(entity));
+            assert!(keeps_attrib_entity(entity, true, true));
+        }
+    }
+
+    #[test]
+    fn keeps_attrib_entity_drops_candidate_noise_only_in_best_effort() {
+        let noise = attrib_entity_with_text("\u{E000}\u{E001}");
+        assert!(!keeps_attrib_entity(&noise, false, true));
+        assert!(keeps_attrib_entity(&noise, false, false));
+        let plain = attrib_entity_with_text("ABC");
+        assert!(keeps_attrib_entity(&plain, false, true));
     }
 }

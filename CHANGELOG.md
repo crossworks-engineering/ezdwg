@@ -43,6 +43,14 @@
   when the next four doubles look like a tangent pair.
 - A HATCH whose every decode candidate lacks a usable boundary is reported as a
   decode failure instead of an entity with empty paths.
+- ATTRIB/ATTDEF of R2007 and later: a record read at its exact layout is
+  returned as it is. The plausibility check that guards the candidate search
+  was also applied to these records and dropped real values: a symbol on its
+  own (a degree sign), a character of a symbol font in the private use area,
+  a C1 control character, or a text height below 1e-8. On 1,279 production
+  drawings (R2013 and R2018) 272 attributes of 60 drawings were dropped this
+  way and are read now; nothing else in what the reader returns changes. The
+  check still applies to the fallback readers.
 
 ### Rust crate distribution
 - `writer::WriterEntity` boxes its large variants (`Spline`, `Face3d`,

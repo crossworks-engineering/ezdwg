@@ -3841,8 +3841,9 @@ pub fn decode_attrib_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         limit,
         0x02,
         "ATTRIB",
+        false,
         |reader, version, header, object_handle| {
-            decode_attrib_for_version(reader, version, header, object_handle)
+            decode_attrib_fallback_for_version(reader, version, header, object_handle)
         },
     )
 }
@@ -3854,8 +3855,9 @@ pub fn decode_attdef_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<
         limit,
         0x03,
         "ATTDEF",
+        true,
         |reader, version, header, object_handle| {
-            decode_attdef_for_version(reader, version, header, object_handle)
+            decode_attdef_fallback_for_version(reader, version, header, object_handle)
         },
     )
 }
@@ -4825,6 +4827,17 @@ fn decode_attrib_for_version(
     {
         return Ok(entity);
     }
+    decode_attrib_fallback_for_version(reader, version, header, object_handle)
+}
+
+/// ATTRIB read without the exact layout: the candidate search of R2010 and
+/// later, and the readers of the older versions.
+fn decode_attrib_fallback_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::AttribEntity> {
     match version {
         version::DwgVersion::R2010 => decode_r2010_entity_with_start_and_end_bit_candidates_scored(
             reader,
@@ -4867,6 +4880,16 @@ fn decode_attdef_for_version(
     {
         return Ok(entity);
     }
+    decode_attdef_fallback_for_version(reader, version, header, object_handle)
+}
+
+/// ATTDEF read without the exact layout; see `decode_attrib_fallback_for_version`.
+fn decode_attdef_fallback_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::AttribEntity> {
     match version {
         version::DwgVersion::R2010 => decode_r2010_entity_with_start_and_end_bit_candidates_scored(
             reader,

@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import pytest
+
 import ezdwg
 import ezdwg.document as document_module
 
@@ -247,3 +249,33 @@ def test_query_insert_and_minsert_uses_combined_decoder(monkeypatch) -> None:
     assert calls["combined"] == 1
     assert calls["insert"] == 0
     assert calls["minsert"] == 0
+
+
+@pytest.mark.parametrize(
+    ("text", "height"),
+    [
+        ("\u00b0", 2.5),  # a symbol on its own
+        ("\ue000B", 2.5),  # a symbol font character of the private use area
+        ("A\u0085", 2.5),  # a C1 control character
+        ("T1", 1.0e-9),  # a very small text height
+    ],
+)
+def test_exact_attribute_is_kept_when_its_value_looks_like_noise(
+    tmp_path, text: str, height: float
+) -> None:
+    """A record read at its exact layout is not dropped by the candidate check."""
+    doc = ezdwg.new("AC1032")
+    block = doc.blocks.new("B1")
+    block.add_line((0, 0, 0), (1, 0, 0))
+    block.add_attdef("DEF", text, (0, 0, 0), height, prompt="p")
+    ref = doc.modelspace().add_blockref("B1", (5, 5, 0))
+    doc.modelspace().add_attrib(ref, "TAG", text, (5, 5, 0), height)
+    path = tmp_path / "attrib.dwg"
+    doc.save(path)
+
+    values = {
+        entity.dxf["tag"]: (entity.dxf["text"], entity.dxf["height"])
+        for entity in ezdwg.read(str(path)).entities().iter_entities()
+        if entity.dxftype in {"ATTRIB", "ATTDEF"}
+    }
+    assert values == {"DEF": (text, height), "TAG": (text, height)}
