@@ -204,6 +204,15 @@ def test_raw_mleader_rows() -> None:
     ]
 
 
+@pytest.mark.parametrize("version", sorted(SAMPLES))
+def test_style_rows_hold_the_mleaders(version: str) -> None:
+    rows = {row[0]: row[1:] for row in raw.decode_entity_styles(str(SAMPLES[version]))}
+    # Color by layer, no true color, layer "0".
+    assert [rows.get(handle) for handle in (FIRST_HANDLE, *range(0xB1A, 0xB28))] == [
+        (256, None, 0x10)
+    ] * 15
+
+
 def test_r14_mleaders_are_not_read() -> None:
     assert R14_SAMPLE.exists(), f"missing sample: {R14_SAMPLE}"
     # The drawing holds the 15 objects, as its object list shows.

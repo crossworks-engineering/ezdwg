@@ -5824,6 +5824,36 @@ fn read_tu_bounded(
 }
 
 #[cfg(test)]
+mod mleader_version_tests {
+    use super::{decode_mleader_for_version, version, ApiObjectHeader};
+    use crate::bit::BitReader;
+    use crate::core::error::ErrorKind;
+
+    #[test]
+    fn mleader_of_r13_and_r14_is_refused_whatever_the_record_holds() {
+        let header = ApiObjectHeader {
+            data_size: 0,
+            type_code: 500,
+            handle_stream_size_bits: None,
+            data_start_bit: None,
+        };
+        for dwg_version in [version::DwgVersion::R13, version::DwgVersion::R14] {
+            let mut reader = BitReader::new(&[]);
+            let error = decode_mleader_for_version(&mut reader, &dwg_version, &header, 0x50)
+                .expect_err("refused");
+            assert_eq!(error.kind, ErrorKind::Unsupported);
+            assert_eq!(error.message, "MULTILEADER is not read before R2000");
+        }
+        // A later version reads the record: here it has none.
+        let mut reader = BitReader::new(&[]);
+        let error =
+            decode_mleader_for_version(&mut reader, &version::DwgVersion::R2000, &header, 0x50)
+                .expect_err("no record");
+        assert_ne!(error.kind, ErrorKind::Unsupported);
+    }
+}
+
+#[cfg(test)]
 mod proxy_chunk_tests {
     use super::parse_proxy_graphic_chunk_infos;
 
