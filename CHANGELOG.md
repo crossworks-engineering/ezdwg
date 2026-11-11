@@ -22,10 +22,12 @@
   808 → 691 MB); building the tables takes about 0.3 s longer. `0.0` and
   `-0.0` are kept apart. The values are unchanged.
 - R2004: a class whose DWG or maintenance version is above 255 no longer
-  costs the drawing all of its class names. The two fields are bit longs, as
-  in the later versions, and were read as bit shorts; such a drawing had every
-  class-based object as `UNKNOWN(...)` and returned none of the entities of
-  those classes (IMAGE, for one).
+  costs the drawing its class names. The two fields are bit longs, as in the
+  later versions, and were read as bit shorts, so the classes after such a
+  class were read out of step and the drawing lost or garbled its class
+  names. In the sample drawing of the repository every class-based object was
+  `UNKNOWN(...)` and none of the entities of those classes (IMAGE, for one)
+  was returned.
 - Query present type names and type-specific handles directly from the shared
   Rust catalog. High-level type discovery and handle lookups no longer transfer
   or scan the complete object-header table in Python. Add
