@@ -255,9 +255,10 @@ an image definition: the frame `insert`, `u_vector`, `v_vector` and `size`
 masked area. Read only; R2000 and later.
 
 A clip vertex `(x, y)` counts columns from the left of the frame and rows
-from its top, as for IMAGE: `(0, 0)` is the centre of the upper-left cell, so
-the frame begins half a cell before it. The world point of a vertex is
-`insert + u_vector * (x + 0.5) + v_vector * (size[1] - 0.5 - y)`.
+from its top: `(0, 0)` is the centre of the upper-left cell, so the frame
+begins half a cell before it. The world point of a vertex is
+`insert + u_vector * (x + 0.5) + v_vector * (size[1] - 0.5 - y)`. This is
+checked for frames of size `(1, 1)` whose axes lie along X and Y.
 
 | Key | Type | Description |
 |-----|------|-------------|

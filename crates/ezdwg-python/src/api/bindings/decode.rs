@@ -4619,14 +4619,15 @@ pub fn decode_image_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<I
 /// there is no image definition, and the clip boundary is the masked area.
 ///
 /// Best effort drops a WIPEOUT whose frame or boundary holds a number that
-/// is not finite. Such a record still counts toward `limit`.
+/// is not finite. `limit` counts the rows that are returned, so a dropped
+/// record does not use it up; every WIPEOUT record is read for that.
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_wipeout_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<WipeoutEntityRow>> {
     let best_effort = decoded_file(path)?.best_effort;
-    let rows = collect_entity_rows(path, limit, 0, "WIPEOUT", decode_image_for_version, |e| {
+    let rows = collect_entity_rows(path, None, 0, "WIPEOUT", decode_image_for_version, |e| {
         (!best_effort || e.has_finite_numbers()).then(|| {
             (
                 e.handle,
@@ -4643,7 +4644,7 @@ pub fn decode_wipeout_entities(
             )
         })
     })?;
-    Ok(rows.into_iter().flatten().collect())
+    Ok(kept_rows(rows, limit))
 }
 
 #[pyfunction(signature = (path, limit=None))]

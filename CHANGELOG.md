@@ -9,7 +9,9 @@
   `raw.decode_wipeout_entities` gives the rows. The record is the one of IMAGE
   without an image definition. Until now these entities were not returned at
   all. Best effort drops a WIPEOUT whose frame or boundary holds a number that
-  is not finite. For a drawing with a WIPEOUT this also changes:
+  is not finite; the `limit` of `raw.decode_wipeout_entities` counts the rows
+  it returns, not a dropped record. For a drawing with a WIPEOUT this also
+  changes:
   - `entities()` and the layouts return the WIPEOUT rows after the IMAGE rows
     and before the TOLERANCE rows.
   - The writers do not know the type. `to_dxf` with `include_unsupported=True`
@@ -77,6 +79,9 @@
   decode failure instead of an entity with empty paths.
 
 ### Rust crate distribution
+- New public method `entities::ImageEntity::has_finite_numbers`: whether every
+  number of the placement frame and of the clip boundary is finite. The
+  WIPEOUT rows of the Python reader use it.
 - `writer::WriterEntity` boxes its large variants (`Spline`, `Face3d`,
   `Insert`, `Attdef`, `Attrib`, `Hatch`, `Dimension`, `Image`, `Viewport`),
   so the enum is 328 bytes instead of 568 and a document of a million lines

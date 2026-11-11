@@ -1370,7 +1370,8 @@ fn matches_type_name(
 ) -> bool {
     // A class-based type (IMAGE, IMAGEDEF, WIPEOUT) has no code of its own:
     // its callers pass 0, and only its class name matches. An object whose
-    // type code reads as 0 is none of them.
+    // type code reads as 0 matches only when the class table of the drawing
+    // itself gives the code 0 that name, which a damaged table can do.
     if builtin_code != 0 && type_code == builtin_code {
         return true;
     }
@@ -1378,6 +1379,15 @@ fn matches_type_name(
         .get(&type_code)
         .map(|name| name == builtin_name)
         .unwrap_or(false)
+}
+
+/// The first `limit` rows that were kept. A dropped row (`None`) does not
+/// count toward `limit`.
+fn kept_rows<R>(rows: Vec<Option<R>>, limit: Option<usize>) -> Vec<R> {
+    rows.into_iter()
+        .flatten()
+        .take(limit.unwrap_or(usize::MAX))
+        .collect()
 }
 
 fn matches_type_filter(filter: &HashSet<u16>, type_code: u16, resolved_name: &str) -> bool {
@@ -1419,11 +1429,21 @@ fn is_known_entity_type_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_plausible_attrib_entity, matches_type_name, resolve_r2010_string_stream_ranges,
+        is_plausible_attrib_entity, kept_rows, matches_type_name,
+        resolve_r2010_string_stream_ranges,
     };
     use crate::bit::BitReader;
     use crate::entities::AttribEntity;
     use std::collections::HashMap;
+
+    #[test]
+    fn limit_counts_the_kept_rows_only() {
+        let rows = || vec![None, Some(101), None, Some(102), Some(103)];
+        assert_eq!(kept_rows(rows(), Some(1)), vec![101]);
+        assert_eq!(kept_rows(rows(), Some(2)), vec![101, 102]);
+        assert_eq!(kept_rows(rows(), Some(0)), Vec::<i32>::new());
+        assert_eq!(kept_rows(rows(), None), vec![101, 102, 103]);
+    }
 
     #[test]
     fn class_based_type_matches_on_its_class_name_only() {
