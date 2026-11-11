@@ -37,7 +37,12 @@
   - R2013 and R2018: the sample drawing of `test_dwg/acadsharp` (15 objects
     in each version) and 964 objects of 236 production drawings (271 in 57
     R2013 drawings, 693 in 179 R2018 drawings). Every object decodes, and
-    every value that reader prints for a returned field equals the row.
+    every value that reader prints for a returned field equals the row. That
+    comparison ends in front of the block attributes: that reader prints no
+    attribute text. The attribute text rests on three other things: the walk
+    of each record ends exactly, the attribute handle of each of the 962
+    block labels is an attribute definition, and the text of each of the 962
+    equals the text in the saved picture of the same object.
   - R2000, R2007 and R2010: the sample drawing only, 15 objects in each,
     equal to that reader.
   - R2004: the sample drawing only, 15 objects. That reader does not give
@@ -45,10 +50,16 @@
   - What the objects are: all have one leader with one line of one point.
     The label is a text on the sample's objects and on 2 production objects,
     and a block with one attribute on 962 production objects. No object has
-    a label of another kind, and none has a spline leader line.
+    a label of another kind, and none has a spline leader line. So a block
+    label is proven for R2013 and R2018 only; for the older versions it is
+    read on records that the tests build.
   What that evidence does not hold is not claimed:
-  - More than one leader, line or point is read as a repeat of the one that
-    is proven. No drawing proves the repeat.
+  - More than one leader, line, point or block attribute is read as a
+    repeat of the one that is proven. No drawing proves the repeat. For
+    block attributes the rule that a record must end exactly is no guard: an
+    attribute takes its definition handle, its numbers and its text from
+    three streams, every stream would still end exactly with the parts
+    paired wrongly, and nothing checks the pairing.
   - A record with a break in a leader or in a leader line, with a text column
     height, or (before R2010) with an entry in the two lists at its end is
     not returned: how those items are stored is not known.
@@ -56,8 +67,9 @@
   effort, and `ezdwg inspect` counts it under `decode_gap[MULTILEADER]`. A
   record is returned only when its layout ends exactly where its data, its
   strings and its handles end. Best effort drops a MULTILEADER that holds a
-  number that is not finite; the `limit` of `raw.decode_mleader_entities`
-  counts the rows it returns. For a drawing with a MULTILEADER this also
+  number that is not finite (in Rust, `MLeaderEntity::has_finite_numbers`
+  says so); the `limit` of `raw.decode_mleader_entities` counts the rows it
+  returns. For a drawing with a MULTILEADER this also
   changes:
   - `entities()` and the layouts return the MULTILEADER rows after the
     LEADER rows and before the HATCH rows.

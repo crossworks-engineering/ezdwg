@@ -10,8 +10,17 @@
 //! record only when its walk ends that way.
 //!
 //! Limits of that evidence, which the decoder keeps:
-//! - Every object has one leader with one line of one point. More leaders,
-//!   lines and points are read as a plain repeat; no drawing proves it.
+//! - Every object has one leader with one line of one point, and every
+//!   block label has one attribute. More leaders, lines, points and
+//!   attributes are read as a plain repeat; no drawing proves it.
+//! - An attribute of a block label takes its definition from the handle
+//!   stream, its numbers from the data and its text from the string stream.
+//!   The walk checks that each stream ends exactly. It does not check that
+//!   the three parts of one attribute belong together: with two attributes
+//!   or more, a wrong pairing would still end exactly.
+//! - A block label is in the production drawings only, so it is proven for
+//!   R2013 and R2018. For the older layouts it is read on records that the
+//!   tests build.
 //! - No object has a break in a leader or in a leader line, or a text column
 //!   height, and
 //!   before R2010 no object has an entry in the two lists of the tail. The
@@ -157,7 +166,7 @@ pub struct MLeaderEntity {
     pub attributes: Vec<MLeaderAttribute>,
     /// Whether every number that was read is finite (also the numbers that
     /// are not returned).
-    pub finite: bool,
+    pub(crate) finite: bool,
 }
 
 impl MLeaderEntity {
@@ -1335,6 +1344,151 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A walk over bare streams, for the list readers.
+    fn walk<'a>(
+        layout: Layout,
+        data: &'a [u8],
+        data_end: u64,
+        strings: &'a [u8],
+        handles: &'a [u8],
+    ) -> Walk<'a> {
+        Walk {
+            data: BitReader::new(data),
+            data_end,
+            strings: Some((BitReader::new(strings), strings.len() as u64 * 8)),
+            handles: BitReader::new(handles),
+            base_handle: HANDLE,
+            layout,
+            finite: true,
+        }
+    }
+
+    /// Longs, shorts or doubles of the value 0: the short form, 2 bits each.
+    fn zeros(writer: &mut BitWriter, count: usize) {
+        for _ in 0..count {
+            writer.write_bb(2).expect("zero");
+        }
+    }
+
+    /// A leader before R2010 up to its line count: two flags off, the end
+    /// of its lines and the dogleg vector (3 doubles each), no break, the
+    /// index and the dogleg length.
+    fn least_leader_head(writer: &mut BitWriter) {
+        writer.write_b(0).expect("flag");
+        writer.write_b(0).expect("flag");
+        zeros(writer, 9);
+    }
+
+    const MANY: u32 = 40;
+
+    fn count_error(what: &str) -> String {
+        format!("MULTILEADER {what} count {MANY} is larger than the record")
+    }
+
+    #[test]
+    fn list_of_least_items_is_read_with_its_count_exactly_at_the_bound() {
+        // Every item is as small as the layout lets it be: its numbers are
+        // 0 in the short form and its lists are empty. Such a list takes
+        // exactly its bound in bits, so a bound that is one bit too high
+        // would refuse a record that is whole. One bit less than the bound
+        // is refused before memory is reserved.
+        let many = MANY as usize;
+
+        // Leaders without lines (a layout before R2010).
+        let mut writer = BitWriter::new();
+        writer.write_bl(MANY).expect("leader count");
+        let begin = writer.tell_bits();
+        for _ in 0..many {
+            least_leader_head(&mut writer);
+            zeros(&mut writer, 1);
+        }
+        let end = writer.tell_bits();
+        assert_eq!(end - begin, u64::from(MANY) * LEADER_BITS);
+        let data = writer.into_bytes();
+        let leaders = walk(Layout::R2004, &data, end, &[], &[])
+            .leaders()
+            .expect("at the bound");
+        assert_eq!(leaders.len(), many);
+        assert!(leaders.iter().all(|leader| leader.lines.is_empty()));
+        let error = walk(Layout::R2004, &data, end - 1, &[], &[])
+            .leaders()
+            .expect_err("one bit short");
+        assert_eq!(error.message, count_error("leader"));
+
+        // Lines without points: no point, no break, the index.
+        let mut writer = BitWriter::new();
+        writer.write_bl(1).expect("leader count");
+        least_leader_head(&mut writer);
+        writer.write_bl(MANY).expect("line count");
+        let begin = writer.tell_bits();
+        zeros(&mut writer, 3 * many);
+        let end = writer.tell_bits();
+        assert_eq!(end - begin, u64::from(MANY) * LINE_BITS);
+        let data = writer.into_bytes();
+        let leaders = walk(Layout::R2004, &data, end, &[], &[])
+            .leaders()
+            .expect("at the bound");
+        assert_eq!(leaders[0].lines.len(), many);
+        let error = walk(Layout::R2004, &data, end - 1, &[], &[])
+            .leaders()
+            .expect_err("one bit short");
+        assert_eq!(error.message, count_error("leader line"));
+
+        // Points at the origin. The data ends with the last point here: the
+        // two fields that close the line are there, past that end.
+        let mut writer = BitWriter::new();
+        writer.write_bl(1).expect("leader count");
+        least_leader_head(&mut writer);
+        writer.write_bl(1).expect("line count");
+        writer.write_bl(MANY).expect("count of points");
+        let begin = writer.tell_bits();
+        zeros(&mut writer, 3 * many);
+        let end = writer.tell_bits();
+        assert_eq!(end - begin, u64::from(MANY) * POINT_BITS);
+        zeros(&mut writer, 2);
+        let data = writer.into_bytes();
+        let leaders = walk(Layout::R2004, &data, end, &[], &[])
+            .leaders()
+            .expect("at the bound");
+        assert_eq!(leaders[0].lines[0].points, vec![(0.0, 0.0, 0.0); many]);
+        let error = walk(Layout::R2004, &data, end - 1, &[], &[])
+            .leaders()
+            .expect_err("one bit short");
+        assert_eq!(error.message, count_error("leader line point"));
+
+        // Block attributes (R2010 and later): the index and the width in the
+        // data, the definition in the handle stream, an empty text in the
+        // string stream.
+        let mut writer = BitWriter::new();
+        writer.write_bl(MANY).expect("attribute count");
+        let begin = writer.tell_bits();
+        zeros(&mut writer, 2 * many);
+        let end = writer.tell_bits();
+        assert_eq!(end - begin, u64::from(MANY) * ATTRIBUTE_BITS);
+        let data = writer.into_bytes();
+        let mut strings = BitWriter::new();
+        zeros(&mut strings, many);
+        let strings = strings.into_bytes();
+        let mut handles = BitWriter::new();
+        for number in 0..u64::from(MANY) {
+            handles.write_inline_h(5, 0x300 + number).expect("handle");
+        }
+        let handles = handles.into_bytes();
+        let attributes = walk(Layout::R2010, &data, end, &strings, &handles)
+            .attributes()
+            .expect("at the bound");
+        assert_eq!(attributes.len(), many);
+        assert_eq!(
+            attributes[many - 1].definition_handle,
+            0x300 + u64::from(MANY) - 1
+        );
+        assert!(attributes.iter().all(|attribute| attribute.text.is_empty()));
+        let error = walk(Layout::R2010, &data, end - 1, &strings, &handles)
+            .attributes()
+            .expect_err("one bit short");
+        assert_eq!(error.message, count_error("block attribute"));
     }
 
     #[test]

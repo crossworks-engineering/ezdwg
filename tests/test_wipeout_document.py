@@ -171,6 +171,44 @@ def test_wipeout_with_a_number_that_is_not_finite_is_dropped(tmp_path, bad: floa
     assert list(ezdwg.read(str(broken)).entities().query("WIPEOUT")) == []
 
 
+def _with_the_image_typed_as_a_wipeout(data: bytes) -> tuple[bytes, int]:
+    """The R2000 sample with its IMAGE record typed as a WIPEOUT, and the handle of that record."""
+    rows = raw.list_object_headers_with_type(str(SAMPLES["AC1015"]))
+    ((handle, offset, _size, image_class),) = [row[:4] for row in rows if row[4] == "IMAGE"]
+    (wipeout_class,) = {row[3] for row in rows if row[4] == "WIPEOUT"}
+    # A record begins with its size (16 bits) and its type: for a class, two
+    # zero bits and the class number as a raw short.
+    low = len(data) * 8 - (offset * 8 + 16) - 18
+    stream = int.from_bytes(data, "big")
+    image_bits = int.from_bytes(struct.pack("<H", image_class), "big")
+    wipeout_bits = int.from_bytes(struct.pack("<H", wipeout_class), "big")
+    assert (stream >> low) & 0x3FFFF == image_bits
+    stream ^= (image_bits ^ wipeout_bits) << low
+    return stream.to_bytes(len(data), "big"), handle
+
+
+def test_limit_counts_the_wipeouts_that_are_returned(tmp_path) -> None:
+    # No public drawing has two WIPEOUT. The record of a WIPEOUT is the one
+    # of an IMAGE, so a copy of the R2000 sample whose IMAGE record is typed
+    # as a WIPEOUT has two: the true one first.
+    two, second = _with_the_image_typed_as_a_wipeout(SAMPLES["AC1015"].read_bytes())
+    path = tmp_path / "two.dwg"
+    path.write_bytes(two)
+
+    def handles(file, limit=None) -> list[int]:
+        return [row[0] for row in raw.decode_wipeout_entities(str(file), limit=limit)]
+
+    assert handles(path) == [WIPEOUT_HANDLE, second]
+    assert handles(path, limit=1) == [WIPEOUT_HANDLE]
+
+    # The first one gets a number that is not finite and is dropped. It does
+    # not use up the limit.
+    broken = tmp_path / "broken.dwg"
+    broken.write_bytes(_with_raw_double(two, BOUNDARY[1][0], float("nan")))
+    assert handles(broken) == [second]
+    assert handles(broken, limit=1) == [second]
+
+
 def test_to_dxf_counts_a_wipeout_as_skipped_and_strict_raises(tmp_path) -> None:
     pytest.importorskip("ezdxf")
     doc = ezdwg.read(str(SAMPLES["AC1032"]))

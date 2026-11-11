@@ -281,7 +281,9 @@ under `context` what is drawn, in drawing units. A key that ends in `_handle`
 names another object (a style, a linetype, a text style, a block record, an
 attribute definition); 0 is no object. A color is `(color index, value)`: the
 value is the 32-bit number a DXF file shows for it, and 0 in R2000, which
-stores the color index only.
+stores the color index only. Points and directions are in world coordinates,
+as a DXF file of the drawing shows them. That was checked for objects in the
+XY plane only: no object of the evidence lies in another plane.
 
 | Key | Type | Description |
 |-----|------|-------------|
@@ -331,16 +333,23 @@ Each of `leaders`:
 | `index` | `int` | As stored |
 | `attachment_direction` | `int \| None` | R2010 and later: 0 horizontal, 1 vertical |
 
-A leader line is drawn from its `points` to the `last_point` of its leader.
+A leader line runs from its `points` to the `last_point` of its leader. That
+is the DXF form of the entity; no test of this library draws a leader line.
 
 How far this is proven: the layout was found by comparing records with what
 an independent reader prints for them, on one sample drawing in six versions
 (15 objects each) and on 964 objects of production drawings (R2013 and
-R2018). Every one of them has one leader with one line of one point. More
-leaders, lines and points are read as a repeat. A record with a break in a
-leader or in a leader line, with a text column height, or, before R2010, with
-an entry in the two lists at its end is not returned: no drawing shows how
-those items are stored. `ezdwg inspect` counts such a record under
+R2018). Every one of them has one leader with one line of one point, and
+every block label has one attribute. More leaders, lines, points and
+attributes are read as a repeat. For attributes nothing checks the repeat:
+an attribute takes its definition handle, its numbers and its text from
+three streams of the record, and with two attributes or more a wrong pairing
+of those parts would not be seen. A block label was compared on the R2013
+and R2018 production drawings only; the sample drawing has none, so for the
+older versions it is read on records that the tests build. A record with a
+break in a leader or in a leader line, with a text column height, or, before
+R2010, with an entry in the two lists at its end is not returned: no drawing
+shows how those items are stored. `ezdwg inspect` counts such a record under
 `decode_gap[MULTILEADER]`.
 
 ### SPLINE
