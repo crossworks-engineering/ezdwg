@@ -422,5 +422,40 @@ Every sheet has one viewport that stands for the sheet itself: the first of
 `Document.layouts()[name]["viewport_handles"]`. Its view shows the sheet at
 scale 1.
 
+## Saved Picture of an Entity
+
+An application can store a picture of an entity in its record (a proxy
+graphic), so that a program without the code of that entity can still draw
+it. Entities of a class, such as MULTILEADER, ACAD_TABLE, MESH, IMAGE,
+WIPEOUT and an underlay, often carry one.
+`raw.decode_entity_proxy_graphics` returns those bytes by handle:
+
+```python
+handles = [entity.handle for entity in doc.entities().query("MULTILEADER")]
+for handle, picture in ezdwg.raw.decode_entity_proxy_graphics("drawing.dwg", handles):
+    if picture is None:
+        ...  # the entity has no saved picture
+```
+
+- There is one row for each handle asked whose record is an entity and
+  reads, in the order asked.
+- The bytes are returned as stored: they are the bytes a DXF file of the
+  drawing carries as the proxy graphic of the entity. The function does not
+  look into them.
+- A handle with no row was not read: it is not in the drawing, it is not an
+  entity, or its record is damaged (the picture runs past the end of the
+  record, or the record holds another handle than the one asked). The
+  handles asked less the rows returned is the count of those.
+- DWG versions R14 to R2018. R13 is not read, and gives no rows.
+
+How far this is proven: the place of the picture in the record was found by
+comparing the bytes with the proxy graphic that an independent reader writes
+into a DXF file for the same entity. On the sample drawing of
+`test_dwg/acadsharp` the bytes are equal for 20 entities in each of R2000,
+R2007, R2010, R2013 and R2018. That reader gives no proxy graphic for the
+R2004 sample and only one for the R14 sample (equal); there the pictures of
+5 entities equal the bytes of the same entities in R2000, and the pictures
+of the 15 MULTILEADER have the same lengths as in R2000.
+
 !!! note "ARC Angles"
     The high-level API returns ARC angles in **degrees**. The raw API (`ezdwg.raw`) returns angles in **radians**.

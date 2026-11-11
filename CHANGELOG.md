@@ -72,6 +72,34 @@
     `decode_gap[MULTILEADER]: n` in that place.
   - The style rows now hold each MULTILEADER, so it counts in the layer color
     heuristic for AC1024, AC1027 and AC1032 drawings like any other entity.
+- `raw.decode_entity_proxy_graphics(path, handles)` returns the saved picture
+  (proxy graphic) of entities: the bytes an application stored in the record
+  so that a program without the code of the entity can still draw it. They
+  are the bytes a DXF file of the drawing carries as the proxy graphic of
+  the entity. One row `(handle, bytes)` for each handle asked whose record
+  is an entity and reads, in the order asked; the bytes are `None` when the
+  entity has no saved picture. The bytes are returned as stored and are not
+  looked into. R14 to R2018; R13 is not read and gives no rows. In Rust:
+  `entities::common::read_entity_proxy_graphic` and `ProxyGraphicLayout`.
+  - The size of a picture is checked against the bits the record has left
+    before a byte is copied. A picture that runs past its record, a record
+    that holds another handle than the one asked, and an object that is not
+    an entity give no row. The handles asked less the rows returned is the
+    count of the handles that were not read.
+  - No description of the record was used: the place of the picture was
+    found by comparing the bytes with the proxy graphic that an independent
+    reader writes into a DXF file for the same entity. The evidence is the
+    sample drawing of `test_dwg/acadsharp`, which has 22 entities with a
+    saved picture in each version (15 MULTILEADER, 2 ACAD_TABLE, 2 MESH, an
+    IMAGE, a WIPEOUT and a PDF underlay). R2000, R2007, R2010, R2013 and
+    R2018: the bytes of 20 entities equal that reader's; it gives no
+    picture for the 2 ACAD_TABLE. R2004: that reader gives none of the
+    entities; the pictures of 5 entities equal the R2000 bytes of the same
+    entities, and the 15 MULTILEADER pictures have the same lengths as in
+    R2000. R14: one picture equals that reader's, and the rest compare with
+    R2000 as for R2004. In every version each of the other entities of the
+    sample reads as an entity without a saved picture, and that reader
+    gives no picture for them either.
 - A class-based type (IMAGE, IMAGEDEF, WIPEOUT) matches on its class name
   only. An object whose type code reads as 0 was taken for each of them.
 - IMAGE and WIPEOUT: a clip boundary whose vertex count is larger than the

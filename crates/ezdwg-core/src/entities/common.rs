@@ -1013,6 +1013,239 @@ mod tests {
     }
 }
 
+/// Where the saved picture sits in the common entity data of a DWG version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyGraphicLayout {
+    /// R14: the handle comes first; the size of the picture is a raw long.
+    R14,
+    /// R2000 to R2007: as R14, with the size of the object data in bits in
+    /// front of the handle.
+    R2000,
+    /// R2010 to R2018: as R14, but the size of the picture is a bit long long.
+    R2010,
+}
+
+/// The saved picture (proxy graphic) of an entity: the bytes its application
+/// stored so that a program without the code of the entity can still draw it.
+///
+/// The reader stands right after the object type. Read in order: the size of
+/// the object data in bits (`RL`, R2000 to R2007 only), the handle, the
+/// extended data, a flag (`B`: a picture follows), the size of the picture in
+/// bytes (`RL`, from R2010 `BLL`) and the bytes.
+///
+/// Returns the handle of the record and the bytes, or `None` for the bytes
+/// when the flag is off. The bytes are returned as stored and are not looked
+/// into. A picture that the record does not hold whole is an error, and that
+/// is checked before a byte is copied.
+pub fn read_entity_proxy_graphic(
+    reader: &mut BitReader<'_>,
+    layout: ProxyGraphicLayout,
+) -> Result<(u64, Option<Vec<u8>>)> {
+    if layout == ProxyGraphicLayout::R2000 {
+        let _object_data_bits = reader.read_rl(Endian::Little)?;
+    }
+    let handle = reader.read_h()?.value;
+    skip_eed(reader)?;
+    if reader.read_b()? == 0 {
+        return Ok((handle, None));
+    }
+    let size = match layout {
+        ProxyGraphicLayout::R2010 => reader.read_bll()?,
+        ProxyGraphicLayout::R14 | ProxyGraphicLayout::R2000 => {
+            u64::from(reader.read_rl(Endian::Little)?)
+        }
+    };
+    // The bit reader gives zeros for the last bits of a byte it does not have.
+    // So the check counts bits: every byte of the picture is in the record,
+    // and the size itself was not read past the end.
+    let whole_bytes_left = reader
+        .total_bits()
+        .checked_sub(reader.tell_bits())
+        .map(|bits| bits / 8);
+    match whole_bytes_left {
+        Some(left) if size <= left => Ok((handle, Some(reader.read_rcs(size as usize)?))),
+        _ => Err(DwgError::new(
+            ErrorKind::Format,
+            format!("saved picture of {size} bytes runs past the end of the record"),
+        )
+        .with_offset(reader.get_pos().0 as u64)),
+    }
+}
+
+#[cfg(test)]
+mod proxy_graphic_tests {
+    use super::{read_entity_proxy_graphic, ProxyGraphicLayout};
+    use crate::bit::{BitReader, BitWriter, Endian};
+    use crate::core::error::ErrorKind;
+
+    const LAYOUTS: [ProxyGraphicLayout; 3] = [
+        ProxyGraphicLayout::R14,
+        ProxyGraphicLayout::R2000,
+        ProxyGraphicLayout::R2010,
+    ];
+    const HANDLE: u64 = 0x2A7;
+    const PICTURE: [u8; 5] = [0xC3, 0x00, 0x81, 0xFF, 0x3C];
+
+    /// The bits in front of the size of the picture: the size of the object
+    /// data (R2000 layout), the handle, the extended data and the flag.
+    fn head(layout: ProxyGraphicLayout, extended: &[&[u8]], flag: u8) -> BitWriter {
+        let mut writer = BitWriter::new();
+        if layout == ProxyGraphicLayout::R2000 {
+            writer
+                .write_rl(Endian::Little, 777)
+                .expect("object data size");
+        }
+        writer.write_inline_h(0, HANDLE).expect("handle");
+        for block in extended {
+            writer.write_bs(block.len() as u16).expect("block size");
+            writer.write_inline_h(5, 0x12).expect("application");
+            writer.write_rcs(block).expect("block");
+        }
+        writer.write_bs(0).expect("end of the extended data");
+        writer.write_b(flag).expect("flag");
+        writer
+    }
+
+    fn write_size(writer: &mut BitWriter, layout: ProxyGraphicLayout, size: u64) {
+        match layout {
+            ProxyGraphicLayout::R2010 => writer.write_bll(size).expect("size"),
+            _ => writer
+                .write_rl(Endian::Little, u32::try_from(size).expect("raw long"))
+                .expect("size"),
+        }
+    }
+
+    /// A record with the picture `picture` and four bytes of entity data
+    /// after it, and the bit where the picture ends.
+    fn record_with(layout: ProxyGraphicLayout, picture: &[u8]) -> (Vec<u8>, u64) {
+        let mut writer = head(layout, &[], 1);
+        write_size(&mut writer, layout, picture.len() as u64);
+        writer.write_rcs(picture).expect("picture");
+        let end = writer.tell_bits();
+        writer.write_rcs(&[0xEE; 4]).expect("entity data");
+        (writer.into_bytes(), end)
+    }
+
+    #[test]
+    fn saved_picture_is_returned_as_stored_in_each_layout() {
+        for layout in LAYOUTS {
+            let (bytes, end) = record_with(layout, &PICTURE);
+            // The picture does not begin at a byte in any layout.
+            assert_ne!(end % 8, 0, "{layout:?}");
+            let mut reader = BitReader::new(&bytes);
+            let (handle, picture) = read_entity_proxy_graphic(&mut reader, layout).expect("read");
+            assert_eq!(handle, HANDLE, "{layout:?}");
+            assert_eq!(picture.as_deref(), Some(&PICTURE[..]), "{layout:?}");
+            assert_eq!(reader.tell_bits(), end, "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn saved_picture_is_found_behind_extended_data() {
+        for layout in LAYOUTS {
+            let mut writer = head(layout, &[&[7, 8, 9], &[0x55; 20]], 1);
+            write_size(&mut writer, layout, PICTURE.len() as u64);
+            writer.write_rcs(&PICTURE).expect("picture");
+            let bytes = writer.into_bytes();
+            let (handle, picture) =
+                read_entity_proxy_graphic(&mut BitReader::new(&bytes), layout).expect("read");
+            assert_eq!((handle, picture.as_deref()), (HANDLE, Some(&PICTURE[..])));
+        }
+    }
+
+    #[test]
+    fn entity_with_the_flag_off_has_no_saved_picture() {
+        for layout in LAYOUTS {
+            let mut writer = head(layout, &[], 0);
+            // Entity data follows the flag at once: it is not read as a size.
+            writer.write_rcs(&[0xFF; 12]).expect("entity data");
+            let bytes = writer.into_bytes();
+            let (handle, picture) =
+                read_entity_proxy_graphic(&mut BitReader::new(&bytes), layout).expect("read");
+            assert_eq!((handle, picture), (HANDLE, None), "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn saved_picture_of_no_bytes_is_empty_and_not_absent() {
+        for layout in LAYOUTS {
+            let (bytes, _end) = record_with(layout, &[]);
+            let (_handle, picture) =
+                read_entity_proxy_graphic(&mut BitReader::new(&bytes), layout).expect("read");
+            assert_eq!(picture, Some(Vec::new()), "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn size_past_the_record_is_refused() {
+        for layout in LAYOUTS {
+            // One byte more than the record holds whole. The last byte of the
+            // record is there in part, so a count of bytes alone would let it
+            // pass and give a picture that ends in bits the record never had.
+            let mut writer = head(layout, &[], 1);
+            write_size(&mut writer, layout, PICTURE.len() as u64 + 1);
+            writer.write_rcs(&PICTURE).expect("picture");
+            assert_ne!(writer.tell_bits() % 8, 0, "{layout:?}");
+            let bytes = writer.into_bytes();
+            let error = read_entity_proxy_graphic(&mut BitReader::new(&bytes), layout)
+                .expect_err("one byte too many");
+            assert_eq!(error.kind, ErrorKind::Format, "{layout:?}");
+            assert_eq!(
+                error.message,
+                "saved picture of 6 bytes runs past the end of the record"
+            );
+
+            // The largest size the field can hold: refused, nothing reserved.
+            let largest = match layout {
+                ProxyGraphicLayout::R2010 => u64::MAX >> 8,
+                _ => u64::from(u32::MAX),
+            };
+            let mut writer = head(layout, &[], 1);
+            write_size(&mut writer, layout, largest);
+            writer.write_rcs(&PICTURE).expect("picture");
+            let bytes = writer.into_bytes();
+            let error = read_entity_proxy_graphic(&mut BitReader::new(&bytes), layout)
+                .expect_err("largest size");
+            assert_eq!(error.kind, ErrorKind::Format, "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn cut_record_gives_an_error_and_never_another_picture() {
+        for layout in LAYOUTS {
+            // A size of 3: when the record ends inside that byte, the bits
+            // that are there read as a size of 0.
+            for picture in [&PICTURE[..], &PICTURE[..3]] {
+                let (bytes, end) = record_with(layout, picture);
+                for length in 0..=bytes.len() {
+                    let result =
+                        read_entity_proxy_graphic(&mut BitReader::new(&bytes[..length]), layout);
+                    if (length as u64) * 8 >= end {
+                        let (handle, read) = result.expect("whole picture");
+                        assert_eq!((handle, read.as_deref()), (HANDLE, Some(picture)));
+                    } else {
+                        assert!(result.is_err(), "{layout:?} cut at {length}: {result:?}");
+                    }
+                }
+            }
+
+            // No picture: the flag itself must be in the record.
+            let writer = head(layout, &[&[1, 2, 3]], 0);
+            let flag_end = writer.tell_bits();
+            let bytes = writer.into_bytes();
+            for length in 0..=bytes.len() {
+                let result =
+                    read_entity_proxy_graphic(&mut BitReader::new(&bytes[..length]), layout);
+                if (length as u64) * 8 >= flag_end {
+                    assert_eq!(result.expect("flag"), (HANDLE, None));
+                } else {
+                    assert!(result.is_err(), "{layout:?} cut at {length}: {result:?}");
+                }
+            }
+        }
+    }
+}
+
 fn skip_eed(reader: &mut BitReader<'_>) -> Result<()> {
     let mut ext_size = reader.read_bs()?;
     while ext_size > 0 {
