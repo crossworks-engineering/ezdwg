@@ -1162,9 +1162,12 @@ mod classes_section_tests {
 
     #[test]
     fn version_fields_with_the_code_11_keep_the_classes_after_them() {
+        // A bit short takes the code `11` in two bits as a bit long does, so
+        // this test holds with the old read as well: it pins the code, not
+        // the fix.
         let classes = [
             (500, "FIRST", Code11),
-            (501, "SECOND", Maintenance(329)),
+            (501, "SECOND", Maintenance(20)),
             (502, "THIRD", Code11),
         ];
         assert_eq!(parsed(&classes), first_second_third());
