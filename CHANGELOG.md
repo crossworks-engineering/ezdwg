@@ -25,6 +25,53 @@
     AC1024, AC1027 and AC1032 drawings counts the entities of a layer over
     those rows, so a WIPEOUT counts there like any other entity and can change
     what the heuristic decides.
+- MULTILEADER entities are read (R2000 to R2018; R13 and R14 are not):
+  `Document` layouts return them as `MULTILEADER`, and
+  `raw.decode_mleader_entities` gives the rows. A row holds the leaders with
+  their lines and points, the arrowhead and its size, the landing and dogleg
+  values, and the label: a text with its place, height, rotation, width and
+  style, or a block with its place, its matrix and its attribute texts. Until
+  now these entities were not returned at all. No description of the record
+  was used: each field was placed by comparing records with what an
+  independent reader prints for them. The evidence, by version:
+  - R2013 and R2018: the sample drawing of `test_dwg/acadsharp` (15 objects
+    in each version) and 964 objects of 236 production drawings (271 in 57
+    R2013 drawings, 693 in 179 R2018 drawings). Every object decodes, and
+    every value that reader prints for a returned field equals the row.
+  - R2000, R2007 and R2010: the sample drawing only, 15 objects in each,
+    equal to that reader.
+  - R2004: the sample drawing only, 15 objects. That reader does not give
+    them; the rows equal the R2007 rows.
+  - What the objects are: all have one leader with one line of one point.
+    The label is a text on the sample's objects and on 2 production objects,
+    and a block with one attribute on 962 production objects. No object has
+    a label of another kind, and none has a spline leader line.
+  What that evidence does not hold is not claimed:
+  - More than one leader, line or point is read as a repeat of the one that
+    is proven. No drawing proves the repeat.
+  - A record with a break in a leader or in a leader line, with a text column
+    height, or (before R2010) with an entry in the two lists at its end is
+    not returned: how those items are stored is not known.
+  A record that does not decode is left out, as for the other types in best
+  effort, and `ezdwg inspect` counts it under `decode_gap[MULTILEADER]`. A
+  record is returned only when its layout ends exactly where its data, its
+  strings and its handles end. Best effort drops a MULTILEADER that holds a
+  number that is not finite; the `limit` of `raw.decode_mleader_entities`
+  counts the rows it returns. For a drawing with a MULTILEADER this also
+  changes:
+  - `entities()` and the layouts return the MULTILEADER rows after the
+    LEADER rows and before the HATCH rows.
+  - The writers do not know the type. `to_dxf` with `include_unsupported=True`
+    or with a `types` filter that matches MULTILEADER counts each one as
+    skipped, and with `strict=True` it then raises `ValueError`, as for any
+    skipped entity. The default export selects the types it can write, so it
+    does not select a MULTILEADER. A MULTILEADER in a block is left out of
+    the block that `to_dxf` writes, without a count.
+  - `ezdwg inspect` prints `MULTILEADER: n` where it printed
+    `raw_only[MULTILEADER]: n`. For an R13 or R14 drawing it prints
+    `decode_gap[MULTILEADER]: n` in that place.
+  - The style rows now hold each MULTILEADER, so it counts in the layer color
+    heuristic for AC1024, AC1027 and AC1032 drawings like any other entity.
 - A class-based type (IMAGE, IMAGEDEF, WIPEOUT) matches on its class name
   only. An object whose type code reads as 0 was taken for each of them.
 - IMAGE and WIPEOUT: a clip boundary whose vertex count is larger than the
@@ -79,6 +126,11 @@
   decode failure instead of an entity with empty paths.
 
 ### Rust crate distribution
+- New public module `entities::mleader`: `decode_mleader` (R2000 and R2004),
+  `decode_mleader_r2007`, `decode_mleader_r2010`, `decode_mleader_r2013`
+  (also R2018), and the types `MLeaderEntity`, `MLeaderContext`,
+  `MLeaderRoot`, `MLeaderLine`, `MLeaderText`, `MLeaderBlock`,
+  `MLeaderAttribute` and `MLeaderColor`.
 - New public method `entities::ImageEntity::has_finite_numbers`: whether every
   number of the placement frame and of the clip boundary is finite. The
   WIPEOUT rows of the Python reader use it.

@@ -2521,6 +2521,35 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
+        } else if matches_type_name(header.type_code, 0, "MULTILEADER", dynamic_types) {
+            let entity = match decode_mleader_for_version(
+                &mut reader,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+            ) {
+                Ok(entity) => entity,
+                Err(err) if best_effort || is_recoverable_decode_error(&err) => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+            let layer_handle = recover_entity_layer_handle_r2010_plus(
+                &record,
+                decoder.version(),
+                &header,
+                obj.handle.0,
+                entity.layer_handle,
+                &known_layer_handles,
+            );
+            let layer_handle = layer_handle_remap
+                .get(&layer_handle)
+                .copied()
+                .unwrap_or(layer_handle);
+            result.push((
+                entity.handle,
+                entity.color_index,
+                entity.true_color,
+                layer_handle,
+            ));
         } else if matches_type_name(header.type_code, 0x2E, "TOLERANCE", dynamic_types) {
             let entity = match decode_tolerance_for_version(
                 &mut reader,
@@ -4647,6 +4676,136 @@ pub fn decode_wipeout_entities(
     Ok(kept_rows(rows, limit))
 }
 
+/// MULTILEADER entities: a leader whose label is a text or a block. See
+/// `entities::mleader` for the layout and for what it leaves unread. R13 and
+/// R14 are not read.
+///
+/// Best effort leaves out a record that does not decode, and drops a
+/// MULTILEADER that holds a number that is not finite. `limit` counts the
+/// rows that are returned; every MULTILEADER record is read for that.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_mleader_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<MLeaderEntityRow>> {
+    let best_effort = decoded_file(path)?.best_effort;
+    let rows = collect_entity_rows(
+        path,
+        None,
+        0,
+        "MULTILEADER",
+        decode_mleader_for_version,
+        |e| (!best_effort || e.has_finite_numbers()).then(|| mleader_row(e)),
+    )?;
+    Ok(kept_rows(rows, limit))
+}
+
+fn mleader_row(e: entities::MLeaderEntity) -> MLeaderEntityRow {
+    let color = |c: entities::MLeaderColor| (c.index, c.rgb);
+    let context = e.context;
+    let leaders = context
+        .leaders
+        .into_iter()
+        .map(|leader| {
+            (
+                leader.has_last_point,
+                leader.has_dogleg,
+                leader.last_point,
+                leader.dogleg_vector,
+                leader.index,
+                leader.dogleg_length,
+                leader
+                    .lines
+                    .into_iter()
+                    .map(|line| (line.index, line.points))
+                    .collect(),
+                leader.attachment_direction,
+            )
+        })
+        .collect();
+    let text = context.text.map(|t| {
+        (
+            t.text,
+            t.normal,
+            t.style_handle,
+            t.location,
+            t.direction,
+            t.rotation,
+            t.width,
+            color(t.color),
+            t.attachment,
+            t.drawing_direction,
+            (
+                color(t.background_color),
+                t.background_scale,
+                t.background_on,
+            ),
+        )
+    });
+    let block = context.block.map(|b| {
+        (
+            b.block_handle,
+            b.normal,
+            b.location,
+            b.scale,
+            b.rotation,
+            color(b.color),
+            b.matrix.to_vec(),
+        )
+    });
+    (
+        e.handle,
+        e.class_version,
+        (
+            leaders,
+            (
+                context.scale,
+                context.content_base,
+                context.text_height,
+                context.arrow_size,
+                context.landing_gap,
+            ),
+            (
+                context.left_attachment,
+                context.right_attachment,
+                context.text_alignment,
+                context.attachment_type,
+            ),
+            text,
+            block,
+            (
+                context.plane_origin,
+                context.plane_x_axis,
+                context.plane_y_axis,
+                context.plane_normal_reversed,
+            ),
+        ),
+        (e.style_handle, e.override_flags, e.content_type),
+        (
+            e.leader_line_type,
+            color(e.leader_color),
+            e.leader_linetype_handle,
+            e.leader_lineweight,
+            e.landing_enabled,
+            e.dogleg_enabled,
+            e.dogleg_length,
+            e.arrow_handle,
+            e.arrow_size,
+        ),
+        (
+            e.text_style_handle,
+            e.left_attachment,
+            e.right_attachment,
+            e.text_frame,
+        ),
+        (e.block_handle, e.block_connection),
+        e.attributes
+            .into_iter()
+            .map(|a| (a.definition_handle, a.index, a.width, a.text))
+            .collect(),
+    )
+}
+
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_xline_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<XLineEntityRow>> {
     collect_entity_rows(
@@ -5570,6 +5729,35 @@ impl_version_dispatch! {
     r2013: entities::decode_ray_r2013;
     r2007: entities::decode_ray_r2007;
     default: entities::decode_ray;
+}
+
+impl_version_dispatch! {
+    no_r14;
+    fn decode_mleader_from_r2000 -> entities::MLeaderEntity;
+    r2010: entities::decode_mleader_r2010;
+    r2013: entities::decode_mleader_r2013;
+    r2007: entities::decode_mleader_r2007;
+    default: entities::decode_mleader;
+}
+
+/// R13 and R14 are not read: no MULTILEADER record of those versions was
+/// studied.
+fn decode_mleader_for_version(
+    reader: &mut BitReader<'_>,
+    version: &version::DwgVersion,
+    header: &ApiObjectHeader,
+    object_handle: u64,
+) -> crate::core::result::Result<entities::MLeaderEntity> {
+    if matches!(
+        version,
+        version::DwgVersion::R13 | version::DwgVersion::R14
+    ) {
+        return Err(DwgError::new(
+            ErrorKind::Unsupported,
+            "MULTILEADER is not read before R2000",
+        ));
+    }
+    decode_mleader_from_r2000(reader, version, header, object_handle)
 }
 
 impl_version_dispatch! {
