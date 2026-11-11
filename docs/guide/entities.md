@@ -464,7 +464,9 @@ into a DXF file for the same entity. On the sample drawing of
 R2007, R2010, R2013 and R2018. That reader gives no proxy graphic for the
 R2004 sample and only one for the R14 sample (equal); there the pictures of
 5 entities equal the bytes of the same entities in R2000, and the pictures
-of the 15 MULTILEADER have the same lengths as in R2000.
+of the 15 MULTILEADER have the same lengths as in R2000. On 1,279 production
+drawings (R2013 and R2018) all 26,074 saved pictures (964 MULTILEADER, 25,110
+WIPEOUT) equal that reader's bytes.
 
 !!! note "ARC Angles"
     The high-level API returns ARC angles in **degrees**. The raw API (`ezdwg.raw`) returns angles in **radians**.
