@@ -112,6 +112,10 @@
     R2000 as for R2004. In every version each of the other entities of the
     sample reads as an entity without a saved picture, and that reader
     gives no picture for them either.
+  - On 1,279 production drawings (R2013 and R2018) every one of the 26,074
+    saved pictures (964 MULTILEADER, 25,110 WIPEOUT) equals that reader's
+    bytes, no entity has a picture for one of the two readers only, and all
+    5,183,174 entities read.
 - A class-based type (IMAGE, IMAGEDEF, WIPEOUT) matches on its class name
   only. An object whose type code reads as 0 was taken for each of them.
 - IMAGE and WIPEOUT: a clip boundary whose vertex count is larger than the
