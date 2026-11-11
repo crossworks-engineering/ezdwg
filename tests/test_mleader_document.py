@@ -330,12 +330,12 @@ def test_to_dxf_leaves_a_mleader_out_of_the_block_it_writes(monkeypatch, tmp_pat
     monkeypatch.setattr(
         patched_raw,
         "decode_block_entity_names",
-        lambda _path: [(100, "BLOCK", "NOTED"), (101, "ENDBLK", "NOTED")],
+        lambda _path: [(100, "BLOCK", "WITH_MLEADER"), (101, "ENDBLK", "WITH_MLEADER")],
     )
     monkeypatch.setattr(
         patched_raw,
         "decode_insert_entities",
-        lambda _path: [(200, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, "NOTED")],
+        lambda _path: [(200, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, "WITH_MLEADER")],
     )
     line = (111, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0)
     monkeypatch.setattr(patched_raw, "decode_line_entities", lambda _path: [line])
@@ -356,7 +356,7 @@ def test_to_dxf_leaves_a_mleader_out_of_the_block_it_writes(monkeypatch, tmp_pat
     result = ezdwg.to_dxf(doc, str(output), types="INSERT", dxf_version="R2010", strict=True)
     assert (result.total_entities, result.written_entities) == (1, 1)
     assert result.skipped_by_type == {}
-    block = ezdxf.readfile(str(output)).blocks.get("NOTED")
+    block = ezdxf.readfile(str(output)).blocks.get("WITH_MLEADER")
     assert [entity.dxftype() for entity in block] == ["LINE"]
 
 
