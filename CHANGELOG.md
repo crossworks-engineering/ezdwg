@@ -11,6 +11,11 @@
   entities the peak of reading one into cad2d-ir falls by 15 % (638 → 540 MB,
   808 → 691 MB); building the tables takes about 0.3 s longer. `0.0` and
   `-0.0` are kept apart. The values are unchanged.
+- R2004: a class whose DWG or maintenance version is above 255 no longer
+  costs the drawing all of its class names. The two fields are bit longs, as
+  in the later versions, and were read as bit shorts; such a drawing had every
+  class-based object as `UNKNOWN(...)` and returned none of the entities of
+  those classes (IMAGE, for one).
 - Query present type names and type-specific handles directly from the shared
   Rust catalog. High-level type discovery and handle lookups no longer transfer
   or scan the complete object-header table in Python. Add
