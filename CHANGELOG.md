@@ -51,7 +51,9 @@
   text rule and no range of the check applies to such a record now (the text,
   tag and prompt rules, the range of every number, the generation, the ranges
   of the flags and alignments); only a number that is not finite still drops
-  it. On 1,279 production drawings (R2013 and R2018)
+  it. The exact layout keeps its own rules: it does not take a record with an
+  empty tag, a tag that holds a control character, or a text height that is
+  not above 0. On 1,279 production drawings (R2013 and R2018)
   272 attributes of 60 drawings were dropped this way and are read now;
   nothing else in what the reader returns changes. The whole check still
   applies to the fallback readers: the candidate search, and the versions
