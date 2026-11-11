@@ -164,6 +164,21 @@
   when the next four doubles look like a tangent pair.
 - A HATCH whose every decode candidate lacks a usable boundary is reported as a
   decode failure instead of an entity with empty paths.
+- ATTRIB/ATTDEF of R2007 and later: a record read at its exact layout is
+  returned when its numbers are finite. The plausibility check that guards the
+  candidate search was also applied to these records and dropped real values:
+  a symbol on its own (a degree sign), a character of a symbol font in the
+  private use area, a C1 control character, or a text height below 1e-8. No
+  text rule and no range of the check applies to such a record now (the text,
+  tag and prompt rules, the range of every number, the generation, the ranges
+  of the flags and alignments); only a number that is not finite still drops
+  it. The exact layout keeps its own rules: it does not take a record with an
+  empty tag, a tag that holds a control character, or a text height that is
+  not above 0. On 1,279 production drawings (R2013 and R2018)
+  272 attributes of 60 drawings were dropped this way and are read now;
+  nothing else in what the reader returns changes. The whole check still
+  applies to the fallback readers: the candidate search, and the versions
+  before R2007, which have no exact layout.
 
 ### Rust crate distribution
 - New public module `entities::mleader`: `decode_mleader` (R2000 and R2004),
