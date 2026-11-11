@@ -1368,13 +1368,26 @@ fn matches_type_name(
     builtin_name: &str,
     dynamic_types: &HashMap<u16, String>,
 ) -> bool {
-    if type_code == builtin_code {
+    // A class-based type (IMAGE, IMAGEDEF, WIPEOUT) has no code of its own:
+    // its callers pass 0, and only its class name matches. An object whose
+    // type code reads as 0 matches only when the class table of the drawing
+    // itself gives the code 0 that name, which a damaged table can do.
+    if builtin_code != 0 && type_code == builtin_code {
         return true;
     }
     dynamic_types
         .get(&type_code)
         .map(|name| name == builtin_name)
         .unwrap_or(false)
+}
+
+/// The first `limit` rows that were kept. A dropped row (`None`) does not
+/// count toward `limit`.
+fn kept_rows<R>(rows: Vec<Option<R>>, limit: Option<usize>) -> Vec<R> {
+    rows.into_iter()
+        .flatten()
+        .take(limit.unwrap_or(usize::MAX))
+        .collect()
 }
 
 fn matches_type_filter(filter: &HashSet<u16>, type_code: u16, resolved_name: &str) -> bool {
@@ -1415,9 +1428,34 @@ fn is_known_entity_type_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_plausible_attrib_entity, resolve_r2010_string_stream_ranges};
+    use super::{
+        is_plausible_attrib_entity, kept_rows, matches_type_name,
+        resolve_r2010_string_stream_ranges,
+    };
     use crate::bit::BitReader;
     use crate::entities::AttribEntity;
+    use std::collections::HashMap;
+
+    #[test]
+    fn limit_counts_the_kept_rows_only() {
+        let rows = || vec![None, Some(101), None, Some(102), Some(103)];
+        assert_eq!(kept_rows(rows(), Some(1)), vec![101]);
+        assert_eq!(kept_rows(rows(), Some(2)), vec![101, 102]);
+        assert_eq!(kept_rows(rows(), Some(0)), Vec::<i32>::new());
+        assert_eq!(kept_rows(rows(), None), vec![101, 102, 103]);
+    }
+
+    #[test]
+    fn class_based_type_matches_on_its_class_name_only() {
+        let dynamic_types = HashMap::from([(500, "WIPEOUT".to_string())]);
+        assert!(matches_type_name(500, 0, "WIPEOUT", &dynamic_types));
+        assert!(!matches_type_name(500, 0, "IMAGE", &dynamic_types));
+        assert!(!matches_type_name(501, 0, "WIPEOUT", &dynamic_types));
+        // The type code of a damaged object can read as 0.
+        assert!(!matches_type_name(0, 0, "WIPEOUT", &dynamic_types));
+        // A built-in type matches on its code.
+        assert!(matches_type_name(0x13, 0x13, "LINE", &dynamic_types));
+    }
 
     fn set_le_u16(bits: &mut [u8], bit_pos: u32, value: u16) {
         assert_eq!(bit_pos % 8, 0, "test helper only supports byte alignment");

@@ -2490,7 +2490,9 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0, "IMAGE", dynamic_types) {
+        } else if matches_type_name(header.type_code, 0, "IMAGE", dynamic_types)
+            || matches_type_name(header.type_code, 0, "WIPEOUT", dynamic_types)
+        {
             let entity = match decode_image_for_version(
                 &mut reader,
                 decoder.version(),
@@ -4611,6 +4613,38 @@ pub fn decode_image_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<I
             e.reactor_handle,
         )
     })
+}
+
+/// WIPEOUT entities. The record is the one of IMAGE (see `entities::image`):
+/// there is no image definition, and the clip boundary is the masked area.
+///
+/// Best effort drops a WIPEOUT whose frame or boundary holds a number that
+/// is not finite. `limit` counts the rows that are returned, so a dropped
+/// record does not use it up; every WIPEOUT record is read for that.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_wipeout_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<WipeoutEntityRow>> {
+    let best_effort = decoded_file(path)?.best_effort;
+    let rows = collect_entity_rows(path, None, 0, "WIPEOUT", decode_image_for_version, |e| {
+        (!best_effort || e.has_finite_numbers()).then(|| {
+            (
+                e.handle,
+                e.insert,
+                e.u_vector,
+                e.v_vector,
+                e.size,
+                e.display_props,
+                e.clipping,
+                (e.brightness, e.contrast, e.fade),
+                e.clip_type,
+                e.clip_mode,
+                e.clip_vertices,
+            )
+        })
+    })?;
+    Ok(kept_rows(rows, limit))
 }
 
 #[pyfunction(signature = (path, limit=None))]

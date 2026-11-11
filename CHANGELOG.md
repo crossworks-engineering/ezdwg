@@ -3,6 +3,33 @@
 ## Unreleased
 
 ### DWG reader
+- WIPEOUT entities are read (R2000 and later; R13 and R14 are not, as for
+  IMAGE): `Document` layouts return them as `WIPEOUT` with the placement frame
+  and the clip boundary, which is the masked area, and
+  `raw.decode_wipeout_entities` gives the rows. The record is the one of IMAGE
+  without an image definition. Until now these entities were not returned at
+  all. Best effort drops a WIPEOUT whose frame or boundary holds a number that
+  is not finite; the `limit` of `raw.decode_wipeout_entities` counts the rows
+  it returns, not a dropped record. For a drawing with a WIPEOUT this also
+  changes:
+  - `entities()` and the layouts return the WIPEOUT rows after the IMAGE rows
+    and before the TOLERANCE rows.
+  - The writers do not know the type. `to_dxf` with `include_unsupported=True`
+    or with a `types` filter that matches WIPEOUT counts each one as skipped,
+    and with `strict=True` it then raises `ValueError`, as for any skipped
+    entity. The default export selects the types it can write, so it does not
+    select a WIPEOUT. A WIPEOUT in a block is left out of the block that
+    `to_dxf` writes, without a count.
+  - `ezdwg inspect` prints `WIPEOUT: n` where it printed `raw_only[WIPEOUT]: n`.
+  - The style rows now hold each WIPEOUT. The layer color heuristic for
+    AC1024, AC1027 and AC1032 drawings counts the entities of a layer over
+    those rows, so a WIPEOUT counts there like any other entity and can change
+    what the heuristic decides.
+- A class-based type (IMAGE, IMAGEDEF, WIPEOUT) matches on its class name
+  only. An object whose type code reads as 0 was taken for each of them.
+- IMAGE and WIPEOUT: a clip boundary whose vertex count is larger than the
+  rest of the record fails before memory is reserved for the vertices. It
+  failed before as well, after reserving up to 16 MB.
 - The per-entity tables that a read keeps until `clear_decode_caches()`
   (placements, colors, linetypes, lineweights, layers, thickness/extrusion/
   elevation, MTEXT write properties, insert owners) share one object per
@@ -11,6 +38,13 @@
   entities the peak of reading one into cad2d-ir falls by 15 % (638 → 540 MB,
   808 → 691 MB); building the tables takes about 0.3 s longer. `0.0` and
   `-0.0` are kept apart. The values are unchanged.
+- R2004: a class whose DWG or maintenance version is above 255 no longer
+  costs the drawing its class names. The two fields are bit longs, as in the
+  later versions, and were read as bit shorts, so the classes after such a
+  class were read out of step and the drawing lost or garbled its class
+  names. In the sample drawing of the repository every class-based object was
+  `UNKNOWN(...)` and none of the entities of those classes (IMAGE, for one)
+  was returned.
 - Query present type names and type-specific handles directly from the shared
   Rust catalog. High-level type discovery and handle lookups no longer transfer
   or scan the complete object-header table in Python. Add
@@ -45,6 +79,9 @@
   decode failure instead of an entity with empty paths.
 
 ### Rust crate distribution
+- New public method `entities::ImageEntity::has_finite_numbers`: whether every
+  number of the placement frame and of the clip boundary is finite. The
+  WIPEOUT rows of the Python reader use it.
 - `writer::WriterEntity` boxes its large variants (`Spline`, `Face3d`,
   `Insert`, `Attdef`, `Attrib`, `Hatch`, `Dimension`, `Image`, `Viewport`),
   so the enum is 328 bytes instead of 568 and a document of a million lines
