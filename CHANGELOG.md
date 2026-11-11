@@ -44,13 +44,18 @@
 - A HATCH whose every decode candidate lacks a usable boundary is reported as a
   decode failure instead of an entity with empty paths.
 - ATTRIB/ATTDEF of R2007 and later: a record read at its exact layout is
-  returned as it is. The plausibility check that guards the candidate search
-  was also applied to these records and dropped real values: a symbol on its
-  own (a degree sign), a character of a symbol font in the private use area,
-  a C1 control character, or a text height below 1e-8. On 1,279 production
-  drawings (R2013 and R2018) 272 attributes of 60 drawings were dropped this
-  way and are read now; nothing else in what the reader returns changes. The
-  check still applies to the fallback readers.
+  returned when its numbers are finite. The plausibility check that guards the
+  candidate search was also applied to these records and dropped real values:
+  a symbol on its own (a degree sign), a character of a symbol font in the
+  private use area, a C1 control character, or a text height below 1e-8. No
+  text rule and no size range of the check applies to such a record now (the
+  text, tag and prompt rules, the ranges of the height, the width factor and
+  the coordinates, the ranges of the flags and alignments); only a number that
+  is not finite still drops it. On 1,279 production drawings (R2013 and R2018)
+  272 attributes of 60 drawings were dropped this way and are read now;
+  nothing else in what the reader returns changes. The whole check still
+  applies to the fallback readers: the candidate search, and the versions
+  before R2007, which have no exact layout.
 
 ### Rust crate distribution
 - `writer::WriterEntity` boxes its large variants (`Spline`, `Face3d`,

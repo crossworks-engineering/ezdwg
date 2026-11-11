@@ -251,6 +251,26 @@ def test_query_insert_and_minsert_uses_combined_decoder(monkeypatch) -> None:
     assert calls["minsert"] == 0
 
 
+def _written_attribute_values(
+    tmp_path, version: str, text: str, height: float
+) -> dict[str, tuple[str, float]]:
+    """Text and height, by tag, of an ATTDEF and an ATTRIB written and read back."""
+    doc = ezdwg.new(version)
+    block = doc.blocks.new("B1")
+    block.add_line((0, 0, 0), (1, 0, 0))
+    block.add_attdef("DEF", text, (0, 0, 0), height, prompt="p")
+    ref = doc.modelspace().add_blockref("B1", (5, 5, 0))
+    doc.modelspace().add_attrib(ref, "TAG", text, (5, 5, 0), height)
+    path = tmp_path / "attrib.dwg"
+    doc.save(path)
+
+    return {
+        entity.dxf["tag"]: (entity.dxf["text"], entity.dxf["height"])
+        for entity in ezdwg.read(str(path)).entities().iter_entities()
+        if entity.dxftype in {"ATTRIB", "ATTDEF"}
+    }
+
+
 @pytest.mark.parametrize(
     ("text", "height"),
     [
@@ -264,18 +284,15 @@ def test_exact_attribute_is_kept_when_its_value_looks_like_noise(
     tmp_path, text: str, height: float
 ) -> None:
     """A record read at its exact layout is not dropped by the candidate check."""
-    doc = ezdwg.new("AC1032")
-    block = doc.blocks.new("B1")
-    block.add_line((0, 0, 0), (1, 0, 0))
-    block.add_attdef("DEF", text, (0, 0, 0), height, prompt="p")
-    ref = doc.modelspace().add_blockref("B1", (5, 5, 0))
-    doc.modelspace().add_attrib(ref, "TAG", text, (5, 5, 0), height)
-    path = tmp_path / "attrib.dwg"
-    doc.save(path)
-
-    values = {
-        entity.dxf["tag"]: (entity.dxf["text"], entity.dxf["height"])
-        for entity in ezdwg.read(str(path)).entities().iter_entities()
-        if entity.dxftype in {"ATTRIB", "ATTDEF"}
-    }
+    values = _written_attribute_values(tmp_path, "AC1032", text, height)
     assert values == {"DEF": (text, height), "TAG": (text, height)}
+
+
+def test_attribute_without_an_exact_layout_still_passes_the_candidate_check(
+    tmp_path,
+) -> None:
+    """R2000 has no exact layout: its reader applies the check as before."""
+    values = _written_attribute_values(tmp_path, "AC1015", "T1", 2.5)
+    assert values == {"DEF": ("T1", 2.5), "TAG": ("T1", 2.5)}
+    # The check takes a symbol on its own for noise.
+    assert _written_attribute_values(tmp_path, "AC1015", "\u00b0", 2.5) == {}
