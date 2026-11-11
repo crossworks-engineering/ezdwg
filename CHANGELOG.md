@@ -48,10 +48,10 @@
   candidate search was also applied to these records and dropped real values:
   a symbol on its own (a degree sign), a character of a symbol font in the
   private use area, a C1 control character, or a text height below 1e-8. No
-  text rule and no size range of the check applies to such a record now (the
-  text, tag and prompt rules, the ranges of the height, the width factor and
-  the coordinates, the ranges of the flags and alignments); only a number that
-  is not finite still drops it. On 1,279 production drawings (R2013 and R2018)
+  text rule and no range of the check applies to such a record now (the text,
+  tag and prompt rules, the range of every number, the generation, the ranges
+  of the flags and alignments); only a number that is not finite still drops
+  it. On 1,279 production drawings (R2013 and R2018)
   272 attributes of 60 drawings were dropped this way and are read now;
   nothing else in what the reader returns changes. The whole check still
   applies to the fallback readers: the candidate search, and the versions

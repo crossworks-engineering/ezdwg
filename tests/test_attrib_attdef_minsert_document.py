@@ -296,3 +296,23 @@ def test_attribute_without_an_exact_layout_still_passes_the_candidate_check(
     assert values == {"DEF": ("T1", 2.5), "TAG": ("T1", 2.5)}
     # The check takes a symbol on its own for noise.
     assert _written_attribute_values(tmp_path, "AC1015", "\u00b0", 2.5) == {}
+
+
+def test_r2018_attribute_that_the_exact_layout_refuses_goes_to_the_fallback(tmp_path) -> None:
+    """The exact layout takes no tag with a control character.
+
+    The record then goes to the candidate search, which does not find it, and
+    it is not returned. No drawing at hand makes that search return noise for
+    R2010 or later, so the check behind it is tested on R2000 only.
+    """
+    doc = ezdwg.new("AC1032")
+    block = doc.blocks.new("B1")
+    block.add_line((0, 0, 0), (1, 0, 0))
+    ref = doc.modelspace().add_blockref("B1", (5, 5, 0))
+    doc.modelspace().add_attrib(ref, "TAG", "T1", (5, 5, 0), 2.5)
+    doc.modelspace().add_attrib(ref, "BEL\x07", "T2", (5, 9, 0), 2.5)
+    path = tmp_path / "attrib.dwg"
+    doc.save(path)
+
+    tags = [entity.dxf["tag"] for entity in ezdwg.read(str(path)).entities().query("ATTRIB")]
+    assert tags == ["TAG"]
