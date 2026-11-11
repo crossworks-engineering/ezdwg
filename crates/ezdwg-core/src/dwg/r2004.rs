@@ -1029,8 +1029,11 @@ fn parse_classes_section(data: &[u8]) -> Result<Vec<ClassEntry>> {
         let _was_a_zombie = reader.read_b()?;
         let item_class_id = reader.read_bs()?;
         let _number_of_objects = reader.read_bl()?;
-        let _dwg_version = reader.read_bs()?;
-        let _maintenance_version = reader.read_bs()?;
+        // Bit longs, as in the later versions (`parse_classes_section_r21`).
+        // Read as bit shorts, a value above 255 took 16 bits of its 32 and
+        // every class after it was lost.
+        let _dwg_version = reader.read_bl()?;
+        let _maintenance_version = reader.read_bl()?;
         let _unknown0 = reader.read_bl()?;
         let _unknown1 = reader.read_bl()?;
 
@@ -1055,6 +1058,79 @@ fn parse_classes_section(data: &[u8]) -> Result<Vec<ClassEntry>> {
     }
 
     Ok(classes)
+}
+
+#[cfg(test)]
+mod classes_section_tests {
+    use super::{parse_classes_section, SENTINEL_CLASSES_AFTER, SENTINEL_CLASSES_BEFORE};
+    use crate::bit::{BitWriter, Endian};
+
+    /// An R2004 classes section with the classes `(number, DXF name,
+    /// maintenance version)`; `size` is the byte count the section states.
+    fn classes_section(classes: &[(u16, &str, u32)], size: u32) -> Vec<u8> {
+        let mut writer = BitWriter::new();
+        writer
+            .write_rcs(&SENTINEL_CLASSES_BEFORE)
+            .expect("sentinel");
+        writer.write_rl(Endian::Little, size).expect("size");
+        let max_class_number = classes.last().map_or(0, |class| class.0);
+        writer.write_bs(max_class_number).expect("max class number");
+        writer.write_rc(0).expect("zero");
+        writer.write_rc(0).expect("zero");
+        writer.write_b(1).expect("bit flag");
+        for (number, dxf_name, maintenance_version) in classes {
+            writer.write_bs(*number).expect("class number");
+            writer.write_bs(0).expect("proxy flags");
+            writer.write_tv("App").expect("application name");
+            writer.write_tv("AcDbName").expect("class name");
+            writer.write_tv(dxf_name).expect("DXF name");
+            writer.write_b(0).expect("was a zombie");
+            writer.write_bs(0x1F3).expect("item class id");
+            writer.write_bl(1).expect("number of objects");
+            writer.write_bl(33).expect("DWG version");
+            writer
+                .write_bl(*maintenance_version)
+                .expect("maintenance version");
+            writer.write_bl(0).expect("unknown");
+            writer.write_bl(0).expect("unknown");
+        }
+        writer.write_crc_zero().expect("crc");
+        writer.write_rcs(&SENTINEL_CLASSES_AFTER).expect("sentinel");
+        writer.into_bytes()
+    }
+
+    fn parsed(classes: &[(u16, &str, u32)]) -> Vec<(u16, String)> {
+        // The section states its size in bytes: build it once to learn it.
+        let size = classes_section(classes, 0).len() as u32;
+        parse_classes_section(&classes_section(classes, size))
+            .expect("parse")
+            .into_iter()
+            .map(|class| (class.class_number, class.dxf_name))
+            .collect()
+    }
+
+    #[test]
+    fn class_with_a_version_above_255_does_not_lose_the_classes_after_it() {
+        let classes = [
+            (500, "FIRST", 0),
+            (501, "SECOND", 329),
+            (502, "THIRD", 70_000),
+        ];
+        assert_eq!(
+            parsed(&classes),
+            vec![
+                (500, "FIRST".to_string()),
+                (501, "SECOND".to_string()),
+                (502, "THIRD".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn classes_with_small_versions_are_read_as_before() {
+        let classes = [(500, "FIRST", 0), (501, "SECOND", 20), (502, "THIRD", 255)];
+        assert_eq!(parsed(&classes).len(), 3);
+    }
 }
 
 fn parse_classes_section_r21(data: &[u8]) -> Result<Vec<ClassEntry>> {
