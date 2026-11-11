@@ -9,7 +9,9 @@ import pytest
 
 import ezdwg
 import ezdwg.cli as cli_module
+import ezdwg.document as document_module
 from ezdwg import raw
+from tests._catalog_mocks import mock_object_catalog
 
 ROOT = Path(__file__).resolve().parents[1]
 # The same drawing saved in seven versions. From R2000 on the reader gives its
@@ -301,6 +303,61 @@ def test_to_dxf_counts_a_mleader_as_skipped_and_strict_raises(tmp_path) -> None:
         ezdwg.to_dxf(doc, output, types="MULTILEADER", strict=True)
     with pytest.raises(ValueError, match="MULTILEADER:15"):
         ezdwg.to_dxf(doc, output, include_unsupported=True, strict=True)
+
+
+def test_to_dxf_leaves_a_mleader_out_of_the_block_it_writes(monkeypatch, tmp_path) -> None:
+    ezdxf = pytest.importorskip("ezdxf")
+    patched_raw = document_module.raw
+    monkeypatch.setattr(patched_raw, "decode_entity_styles", lambda _path: [])
+    monkeypatch.setattr(patched_raw, "decode_layer_colors", lambda _path: [])
+    document_module._present_supported_types.cache_clear()
+    document_module._entity_handles_by_type_name.cache_clear()
+    document_module._block_and_endblk_name_maps.cache_clear()
+    document_module._entity_style_map.cache_clear()
+    document_module._layer_color_map.cache_clear()
+
+    # A block with a MULTILEADER and a line, and one insert of it.
+    mock_object_catalog(
+        monkeypatch,
+        lambda _path: [
+            (100, 10, 0, 0x04, "BLOCK", "Entity"),
+            (110, 11, 0, 500, "MULTILEADER", "Entity"),
+            (111, 12, 0, 0x13, "LINE", "Entity"),
+            (101, 13, 0, 0x05, "ENDBLK", "Entity"),
+            (200, 14, 0, 0x07, "INSERT", "Entity"),
+        ],
+    )
+    monkeypatch.setattr(
+        patched_raw,
+        "decode_block_entity_names",
+        lambda _path: [(100, "BLOCK", "NOTED"), (101, "ENDBLK", "NOTED")],
+    )
+    monkeypatch.setattr(
+        patched_raw,
+        "decode_insert_entities",
+        lambda _path: [(200, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, "NOTED")],
+    )
+    line = (111, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0)
+    monkeypatch.setattr(patched_raw, "decode_line_entities", lambda _path: [line])
+    monkeypatch.setattr(
+        patched_raw, "decode_line_arc_circle_entities", lambda _path: ([line], [], [])
+    )
+    # A row of the sample, under the handle of the MULTILEADER in the block.
+    row = (110, *raw.decode_mleader_entities(str(SAMPLES["AC1032"]))[0][1:])
+    monkeypatch.setattr(patched_raw, "decode_mleader_entities", lambda _path, limit=None: [row])
+
+    output = tmp_path / "block_out.dxf"
+    doc = document_module.Document(path="dummy_mleader_block.dwg", version="AC1032")
+    (mleader,) = doc.entities().query("MULTILEADER")
+    assert mleader.dxf["context"]["text"]["text"] == "MLeader text, hello!"
+
+    # The block export does not count the MULTILEADER it leaves out, and
+    # strict does not raise for it.
+    result = ezdwg.to_dxf(doc, str(output), types="INSERT", dxf_version="R2010", strict=True)
+    assert (result.total_entities, result.written_entities) == (1, 1)
+    assert result.skipped_by_type == {}
+    block = ezdxf.readfile(str(output)).blocks.get("NOTED")
+    assert [entity.dxftype() for entity in block] == ["LINE"]
 
 
 def test_cli_inspect_counts_the_mleaders(capsys) -> None:
