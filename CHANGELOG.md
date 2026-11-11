@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### DWG reader
+- WIPEOUT entities are read (R2000 and later): `Document` layouts return them
+  as `WIPEOUT` with the placement frame and the clip boundary, which is the
+  masked area, and `raw.decode_wipeout_entities` gives the rows. The record is
+  the one of IMAGE without an image definition. Until now these entities were
+  not returned at all. The writers do not know the type: `to_dxf` with
+  `include_unsupported=True` now counts each WIPEOUT as skipped; the default
+  export and what it writes do not change.
+- IMAGE and WIPEOUT: a clip boundary whose vertex count is larger than the
+  rest of the record fails before memory is reserved for the vertices. It
+  failed before as well, after reserving up to 16 MB.
 - The per-entity tables that a read keeps until `clear_decode_caches()`
   (placements, colors, linetypes, lineweights, layers, thickness/extrusion/
   elevation, MTEXT write properties, insert owners) share one object per

@@ -2490,7 +2490,9 @@ pub fn decode_entity_styles(path: &str, limit: Option<usize>) -> PyResult<Vec<En
                 entity.true_color,
                 layer_handle,
             ));
-        } else if matches_type_name(header.type_code, 0, "IMAGE", dynamic_types) {
+        } else if matches_type_name(header.type_code, 0, "IMAGE", dynamic_types)
+            || matches_type_name(header.type_code, 0, "WIPEOUT", dynamic_types)
+        {
             let entity = match decode_image_for_version(
                 &mut reader,
                 decoder.version(),
@@ -4609,6 +4611,30 @@ pub fn decode_image_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<I
             e.clip_vertices,
             e.image_def_handle,
             e.reactor_handle,
+        )
+    })
+}
+
+/// WIPEOUT entities. The record is the one of IMAGE (see `entities::image`):
+/// there is no image definition, and the clip boundary is the masked area.
+#[pyfunction(signature = (path, limit=None))]
+pub fn decode_wipeout_entities(
+    path: &str,
+    limit: Option<usize>,
+) -> PyResult<Vec<WipeoutEntityRow>> {
+    collect_entity_rows(path, limit, 0, "WIPEOUT", decode_image_for_version, |e| {
+        (
+            e.handle,
+            e.insert,
+            e.u_vector,
+            e.v_vector,
+            e.size,
+            e.display_props,
+            e.clipping,
+            (e.brightness, e.contrast, e.fade),
+            e.clip_type,
+            e.clip_mode,
+            e.clip_vertices,
         )
     })
 }

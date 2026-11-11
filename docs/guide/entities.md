@@ -247,6 +247,25 @@ definition cannot be read.
 returns the IMAGEDEF objects as `(handle, file_path, size, is_loaded,
 resolution_units, pixel_size)` tuples.
 
+### WIPEOUT
+
+A mask that hides what lies behind it. The record is the one of IMAGE without
+an image definition: the frame `insert`, `u_vector`, `v_vector` and `size`
+(usually `(1.0, 1.0)`) places the clip boundary, and the clip boundary is the
+masked area. Read only; R2000 and later.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `insert` | `(float, float, float)` | Insertion point (lower-left corner of the frame) |
+| `u_vector` / `v_vector` | `(float, float, float)` | Step of one unit of the boundary coordinates along the columns / rows |
+| `size` | `(float, float)` | Size of the frame in those units |
+| `display_props` | `int` | Display flags, as for IMAGE |
+| `clipping` | `bool` | Whether the clip boundary is enabled |
+| `brightness` / `contrast` / `fade` | `int` | Stored as for IMAGE; they have no effect on a mask |
+| `clip_type` | `int` | 1 rectangle (two corners), 2 polygon |
+| `clip_mode` | `int \| None` | R2010 and later: the clip mode as stored (0 outside, 1 inside); `None` before |
+| `clip_vertices` | `list[(float, float)]` | The boundary, in the coordinates of the frame as for IMAGE |
+
 ### SPLINE
 
 | Key | Type | Description |
