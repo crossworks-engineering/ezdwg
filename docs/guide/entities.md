@@ -254,6 +254,11 @@ an image definition: the frame `insert`, `u_vector`, `v_vector` and `size`
 (usually `(1.0, 1.0)`) places the clip boundary, and the clip boundary is the
 masked area. Read only; R2000 and later.
 
+A clip vertex `(x, y)` counts columns from the left of the frame and rows
+from its top, as for IMAGE: `(0, 0)` is the centre of the upper-left cell, so
+the frame begins half a cell before it. The world point of a vertex is
+`insert + u_vector * (x + 0.5) + v_vector * (size[1] - 0.5 - y)`.
+
 | Key | Type | Description |
 |-----|------|-------------|
 | `insert` | `(float, float, float)` | Insertion point (lower-left corner of the frame) |
@@ -261,10 +266,10 @@ masked area. Read only; R2000 and later.
 | `size` | `(float, float)` | Size of the frame in those units |
 | `display_props` | `int` | Display flags, as for IMAGE |
 | `clipping` | `bool` | Whether the clip boundary is enabled |
-| `brightness` / `contrast` / `fade` | `int` | Stored as for IMAGE; they have no effect on a mask |
+| `brightness` / `contrast` / `fade` | `int` | Stored as for IMAGE |
 | `clip_type` | `int` | 1 rectangle (two corners), 2 polygon |
 | `clip_mode` | `int \| None` | R2010 and later: the clip mode as stored (0 outside, 1 inside); `None` before |
-| `clip_vertices` | `list[(float, float)]` | The boundary, in the coordinates of the frame as for IMAGE |
+| `clip_vertices` | `list[(float, float)]` | The boundary, in the columns and rows of the frame (see above) |
 
 ### SPLINE
 

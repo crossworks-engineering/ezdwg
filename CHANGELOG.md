@@ -3,13 +3,28 @@
 ## Unreleased
 
 ### DWG reader
-- WIPEOUT entities are read (R2000 and later): `Document` layouts return them
-  as `WIPEOUT` with the placement frame and the clip boundary, which is the
-  masked area, and `raw.decode_wipeout_entities` gives the rows. The record is
-  the one of IMAGE without an image definition. Until now these entities were
-  not returned at all. The writers do not know the type: `to_dxf` with
-  `include_unsupported=True` now counts each WIPEOUT as skipped; the default
-  export and what it writes do not change.
+- WIPEOUT entities are read (R2000 and later; R13 and R14 are not, as for
+  IMAGE): `Document` layouts return them as `WIPEOUT` with the placement frame
+  and the clip boundary, which is the masked area, and
+  `raw.decode_wipeout_entities` gives the rows. The record is the one of IMAGE
+  without an image definition. Until now these entities were not returned at
+  all. Best effort drops a WIPEOUT whose frame or boundary holds a number that
+  is not finite. For a drawing with a WIPEOUT this also changes:
+  - `entities()` and the layouts return the WIPEOUT rows after the IMAGE rows
+    and before the TOLERANCE rows.
+  - The writers do not know the type. `to_dxf` with `include_unsupported=True`
+    or with a `types` filter that matches WIPEOUT counts each one as skipped,
+    and with `strict=True` it then raises `ValueError`, as for any skipped
+    entity. The default export selects the types it can write, so it does not
+    select a WIPEOUT. A WIPEOUT in a block is left out of the block that
+    `to_dxf` writes, without a count.
+  - `ezdwg inspect` prints `WIPEOUT: n` where it printed `raw_only[WIPEOUT]: n`.
+  - The style rows now hold each WIPEOUT. The layer color heuristic for
+    AC1024, AC1027 and AC1032 drawings counts the entities of a layer over
+    those rows, so a WIPEOUT counts there like any other entity and can change
+    what the heuristic decides.
+- A class-based type (IMAGE, IMAGEDEF, WIPEOUT) matches on its class name
+  only. An object whose type code reads as 0 was taken for each of them.
 - IMAGE and WIPEOUT: a clip boundary whose vertex count is larger than the
   rest of the record fails before memory is reserved for the vertices. It
   failed before as well, after reserving up to 16 MB.

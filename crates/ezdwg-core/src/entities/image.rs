@@ -35,6 +35,30 @@ pub struct ImageEntity {
     pub reactor_handle: u64,
 }
 
+impl ImageEntity {
+    /// Whether every number of the placement frame and of the clip boundary
+    /// is finite.
+    pub fn has_finite_numbers(&self) -> bool {
+        let (insert, u, v) = (self.insert, self.u_vector, self.v_vector);
+        [
+            insert.0,
+            insert.1,
+            insert.2,
+            u.0,
+            u.1,
+            u.2,
+            v.0,
+            v.1,
+            v.2,
+            self.size.0,
+            self.size.1,
+        ]
+        .iter()
+        .chain(self.clip_vertices.iter().flat_map(|(x, y)| [x, y]))
+        .all(|value| value.is_finite())
+    }
+}
+
 pub fn decode_image(reader: &mut BitReader<'_>) -> Result<ImageEntity> {
     let header = parse_common_entity_header(reader)?;
     decode_image_with_header(reader, header, false, false, false)
@@ -182,12 +206,30 @@ mod tests {
     use crate::core::error::ErrorKind;
     use crate::core::result::Result;
 
-    /// An R2013 IMAGE or WIPEOUT record from its handle on, with a polygon
-    /// clip boundary, and the bit where its handle stream begins. `count` is
-    /// the vertex count the record states; `vertices` are the ones it holds.
-    /// The handle stream is left empty: the reader takes its handles as
-    /// optional.
-    fn polygon_record(count: u32, vertices: &[(f64, f64)]) -> (Vec<u8>, u32) {
+    /// The numbers of the placement frame of a test record: the insertion
+    /// point, the u vector, the v vector and the size.
+    const FRAME: [f64; 11] = [5.0, 6.0, 0.0, 4.0, 0.0, 0.0, 0.0, 2.0, 0.0, 1.0, 1.0];
+    const TRIANGLE: [(f64, f64); 3] = [(0.0, 0.0), (4.0, 0.0), (2.0, 3.0)];
+
+    /// The clip boundary of a test record.
+    enum Clip<'a> {
+        /// Type 1: the corners the record holds. It states no count.
+        Rectangle(&'a [(f64, f64)]),
+        /// Type 2: the count the record states and the vertices it holds.
+        Polygon(u32, &'a [(f64, f64)]),
+    }
+
+    /// An R2013 IMAGE or WIPEOUT record from its handle on.
+    struct Record {
+        bytes: Vec<u8>,
+        /// The bit where the handle stream begins. The stream is left empty:
+        /// the reader takes its handles as optional.
+        data_end_bit: u32,
+        /// The byte where the clip vertices begin.
+        vertices_byte: u64,
+    }
+
+    fn record(frame: [f64; 11], clip: Clip<'_>) -> Record {
         let mut writer = BitWriter::new();
         writer.write_h(0, 0x50).expect("handle");
         writer.write_bs(0).expect("no extended data");
@@ -210,37 +252,55 @@ mod tests {
         writer.write_rc(0).expect("lineweight");
 
         writer.write_bl(0).expect("class version");
-        writer.write_3bd(5.0, 6.0, 0.0).expect("insertion");
-        writer.write_3bd(4.0, 0.0, 0.0).expect("u vector");
-        writer.write_3bd(0.0, 2.0, 0.0).expect("v vector");
-        writer.write_rd(Endian::Little, 1.0).expect("size x");
-        writer.write_rd(Endian::Little, 1.0).expect("size y");
+        writer
+            .write_3bd(frame[0], frame[1], frame[2])
+            .expect("insertion");
+        writer
+            .write_3bd(frame[3], frame[4], frame[5])
+            .expect("u vector");
+        writer
+            .write_3bd(frame[6], frame[7], frame[8])
+            .expect("v vector");
+        writer.write_rd(Endian::Little, frame[9]).expect("size x");
+        writer.write_rd(Endian::Little, frame[10]).expect("size y");
         writer.write_bs(7).expect("display properties");
         writer.write_b(1).expect("clipping");
         writer.write_rc(50).expect("brightness");
         writer.write_rc(50).expect("contrast");
         writer.write_rc(0).expect("fade");
         writer.write_b(0).expect("clip mode");
-        writer.write_bs(2).expect("clip type: polygon");
-        writer.write_bl(count).expect("vertex count");
+        let vertices = match clip {
+            Clip::Rectangle(corners) => {
+                writer.write_bs(1).expect("clip type: rectangle");
+                corners
+            }
+            Clip::Polygon(count, vertices) => {
+                writer.write_bs(2).expect("clip type: polygon");
+                writer.write_bl(count).expect("vertex count");
+                vertices
+            }
+        };
+        let vertices_byte = writer.tell_bits() / 8;
         for (x, y) in vertices {
             writer.write_rd(Endian::Little, *x).expect("vertex x");
             writer.write_rd(Endian::Little, *y).expect("vertex y");
         }
         let data_end_bit = writer.tell_bits() as u32;
-        (writer.into_bytes(), data_end_bit)
+        Record {
+            bytes: writer.into_bytes(),
+            data_end_bit,
+            vertices_byte,
+        }
     }
 
-    fn decode(record: &(Vec<u8>, u32)) -> Result<ImageEntity> {
-        let mut reader = BitReader::new(&record.0);
-        decode_image_r2013(&mut reader, record.1, 0x50)
+    fn decode(record: &Record) -> Result<ImageEntity> {
+        let mut reader = BitReader::new(&record.bytes);
+        decode_image_r2013(&mut reader, record.data_end_bit, 0x50)
     }
-
-    const TRIANGLE: [(f64, f64); 3] = [(0.0, 0.0), (4.0, 0.0), (2.0, 3.0)];
 
     #[test]
     fn polygon_clip_boundary_is_read() {
-        let entity = decode(&polygon_record(3, &TRIANGLE)).expect("decode");
+        let entity = decode(&record(FRAME, Clip::Polygon(3, &TRIANGLE))).expect("decode");
         assert_eq!(entity.handle, 0x50);
         assert_eq!(entity.insert, (5.0, 6.0, 0.0));
         assert_eq!(entity.u_vector, (4.0, 0.0, 0.0));
@@ -254,22 +314,72 @@ mod tests {
     }
 
     #[test]
-    fn vertex_count_past_the_record_is_refused() {
+    fn rectangle_clip_boundary_is_two_corners_without_a_count() {
+        let corners = [(1.0, 2.0), (7.0, 5.0)];
+        let entity = decode(&record(FRAME, Clip::Rectangle(&corners))).expect("decode");
+        assert_eq!(entity.clip_type, 1);
+        assert_eq!(entity.clip_vertices, corners.to_vec());
+    }
+
+    #[test]
+    fn vertex_count_past_the_record_is_refused_before_a_vertex_is_read() {
         // The record states more vertices than it holds: from one more up to
-        // the largest count the decoder takes at all.
+        // the largest count the decoder takes at all. The error points at the
+        // first vertex; a read that ran into the end would point past the
+        // vertices the record holds.
         for count in [4, 1_000, 1_000_000] {
-            let err = decode(&polygon_record(count, &TRIANGLE)).expect_err("count is too large");
+            let record = record(FRAME, Clip::Polygon(count, &TRIANGLE));
+            let err = decode(&record).expect_err("count is too large");
             assert_eq!(err.kind, ErrorKind::Io, "count {count}");
+            assert_eq!(err.offset, Some(record.vertices_byte), "count {count}");
         }
-        let err = decode(&polygon_record(1_000_001, &TRIANGLE)).expect_err("implausible count");
-        assert_eq!(err.kind, ErrorKind::Format);
-        let err = decode(&polygon_record(u32::MAX, &TRIANGLE)).expect_err("implausible count");
-        assert_eq!(err.kind, ErrorKind::Format);
+        // A rectangle with one corner only.
+        let record = record(FRAME, Clip::Rectangle(&TRIANGLE[..1]));
+        let err = decode(&record).expect_err("a corner is missing");
+        assert_eq!(err.kind, ErrorKind::Io);
+        assert_eq!(err.offset, Some(record.vertices_byte));
+    }
+
+    #[test]
+    fn implausible_vertex_count_is_refused() {
+        for count in [1_000_001, u32::MAX] {
+            let err = decode(&record(FRAME, Clip::Polygon(count, &TRIANGLE)))
+                .expect_err("implausible count");
+            assert_eq!(err.kind, ErrorKind::Format, "count {count}");
+        }
     }
 
     #[test]
     fn empty_polygon_is_read_as_no_vertices() {
-        let entity = decode(&polygon_record(0, &[])).expect("decode");
+        let entity = decode(&record(FRAME, Clip::Polygon(0, &[]))).expect("decode");
         assert!(entity.clip_vertices.is_empty());
+    }
+
+    #[test]
+    fn has_finite_numbers_looks_at_the_frame_and_at_every_vertex() {
+        let finite = |frame, vertices: &[(f64, f64)]| {
+            decode(&record(
+                frame,
+                Clip::Polygon(vertices.len() as u32, vertices),
+            ))
+            .expect("decode")
+            .has_finite_numbers()
+        };
+        assert!(finite(FRAME, &TRIANGLE));
+        let mut large = FRAME;
+        large[0] = 1.0e300;
+        assert!(finite(large, &TRIANGLE));
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for index in 0..FRAME.len() {
+                let mut frame = FRAME;
+                frame[index] = bad;
+                assert!(!finite(frame, &TRIANGLE), "frame number {index} is {bad}");
+            }
+            for vertex in [(bad, 0.0), (0.0, bad)] {
+                let vertices = [TRIANGLE[0], TRIANGLE[1], vertex];
+                assert!(!finite(FRAME, &vertices), "last vertex is {vertex:?}");
+            }
+        }
     }
 }
