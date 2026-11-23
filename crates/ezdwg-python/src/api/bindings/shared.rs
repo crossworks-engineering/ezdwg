@@ -285,6 +285,8 @@ type ImageEntityRow = (
     u64,
     u64,
 );
+/// The fields of `ImageEntityRow` up to the clip vertices, then the clip
+/// mode (R2010+).
 type WipeoutEntityRow = (
     u64,
     Point3,
@@ -295,8 +297,8 @@ type WipeoutEntityRow = (
     bool,
     (u8, u8, u8),
     u16,
-    Option<u8>,
     Vec<(f64, f64)>,
+    Option<u8>,
 );
 /// A MULTILEADER color: the color index and the 32-bit value (0 in R2000).
 type MLeaderColorRow = (u16, u32);

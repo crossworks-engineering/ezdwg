@@ -23,7 +23,59 @@ enum HatchStringMode {
 #[derive(Debug, Clone)]
 pub struct HatchPath {
     pub closed: bool,
+    /// The boundary as closed points, with arcs, ellipses and splines flattened.
     pub points: Vec<(f64, f64)>,
+    /// The boundary before flattening.
+    pub boundary: HatchBoundary,
+}
+
+/// A hatch boundary before flattening: a polyline (vertices with their bulges)
+/// or a list of edges.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HatchBoundary {
+    Polyline {
+        closed: bool,
+        vertices: Vec<(f64, f64)>,
+        /// Empty when the polyline stores no bulges.
+        bulges: Vec<f64>,
+    },
+    Edges(Vec<HatchEdge>),
+}
+
+/// One edge of an edge-defined hatch boundary. Angles are in radians.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HatchEdge {
+    Line {
+        start: (f64, f64),
+        end: (f64, f64),
+    },
+    Arc {
+        center: (f64, f64),
+        radius: f64,
+        start_angle: f64,
+        end_angle: f64,
+        counter_clockwise: bool,
+    },
+    Ellipse {
+        center: (f64, f64),
+        major_axis: (f64, f64),
+        ratio: f64,
+        start_angle: f64,
+        end_angle: f64,
+        counter_clockwise: bool,
+    },
+    /// A spline edge as stored, independently of its sampled display points.
+    Spline {
+        degree: u32,
+        rational: bool,
+        periodic: bool,
+        knots: Vec<f64>,
+        control_points: Vec<(f64, f64)>,
+        weights: Vec<f64>,
+        fit_points: Vec<(f64, f64)>,
+        start_tangent: Option<(f64, f64)>,
+        end_tangent: Option<(f64, f64)>,
+    },
 }
 
 /// One family of parallel pattern lines of a pattern-filled hatch.
@@ -495,6 +547,7 @@ fn decode_hatch_body(
         if (path_flag & 0x02) == 0 {
             let num_segments = bounded_count(reader.read_bl()?, "hatch edge path segments")?;
             let mut path_points: Vec<(f64, f64)> = Vec::new();
+            let mut edges: Vec<HatchEdge> = Vec::new();
             for _ in 0..num_segments {
                 let segment_type = reader.read_rc()?;
                 if debug {
@@ -511,6 +564,7 @@ fn decode_hatch_body(
                         require_plausible_hatch_point(end, "line edge end")?;
                         append_segment_points(&mut path_points, &[start, end]);
                         charge_hatch_points(&mut tessellated_points, 2)?;
+                        edges.push(HatchEdge::Line { start, end });
                     }
                     2 => {
                         let center = read_point2rd(reader)?;
@@ -519,13 +573,20 @@ fn decode_hatch_body(
                         let end_angle = reader.read_bd()?;
                         let is_ccw = reader.read_b()? != 0;
                         require_plausible_hatch_point(center, "arc edge center")?;
-                        require_plausible_hatch_scalar(radius, "arc edge radius")?;
+                        require_plausible_hatch_length(radius, "arc edge radius")?;
                         require_plausible_hatch_scalar(start_angle, "arc edge start angle")?;
                         require_plausible_hatch_scalar(end_angle, "arc edge end angle")?;
                         let segment =
                             circular_arc_points(center, radius, start_angle, end_angle, is_ccw, 64);
                         charge_hatch_points(&mut tessellated_points, segment.len())?;
                         append_segment_points(&mut path_points, &segment);
+                        edges.push(HatchEdge::Arc {
+                            center,
+                            radius,
+                            start_angle,
+                            end_angle,
+                            counter_clockwise: is_ccw,
+                        });
                     }
                     3 => {
                         let center = read_point2rd(reader)?;
@@ -553,11 +614,20 @@ fn decode_hatch_body(
                         );
                         charge_hatch_points(&mut tessellated_points, segment.len())?;
                         append_segment_points(&mut path_points, &segment);
+                        edges.push(HatchEdge::Ellipse {
+                            center,
+                            major_axis: major_endpoint,
+                            ratio,
+                            start_angle,
+                            end_angle,
+                            counter_clockwise: is_ccw,
+                        });
                     }
                     4 => {
-                        let segment = spline_edge_points(reader, spline_fit_points, debug)?;
+                        let (segment, edge) = read_spline_edge(reader, spline_fit_points, debug)?;
                         charge_hatch_points(&mut tessellated_points, segment.len())?;
                         append_segment_points(&mut path_points, &segment);
+                        edges.push(edge);
                     }
                     _ => {
                         return Err(DwgError::new(
@@ -572,6 +642,7 @@ fn decode_hatch_body(
             paths.push(HatchPath {
                 closed: true,
                 points: path_points,
+                boundary: HatchBoundary::Edges(edges),
             });
             continue;
         }
@@ -606,6 +677,11 @@ fn decode_hatch_body(
         }
         let _num_boundary_obj_handles = reader.read_bl()?;
 
+        let boundary = HatchBoundary::Polyline {
+            closed,
+            vertices: vertices.clone(),
+            bulges: bulges.clone(),
+        };
         let mut points = if bulges_present {
             polyline_with_bulges_points(&vertices, &bulges, closed, 64)
         } else {
@@ -619,7 +695,11 @@ fn decode_hatch_body(
         if closed {
             close_path_if_needed(&mut points);
         }
-        paths.push(HatchPath { closed, points });
+        paths.push(HatchPath {
+            closed,
+            points,
+            boundary,
+        });
     }
 
     let pattern = match read_hatch_definition_payload(reader, solid_fill, any_path_uses_pixel_size)
@@ -737,6 +817,11 @@ fn scan_hatch_polyline_paths(
             ));
         }
 
+        let boundary = HatchBoundary::Polyline {
+            closed,
+            vertices: vertices.clone(),
+            bulges: bulges.clone(),
+        };
         let mut points = if bulges_present {
             polyline_with_bulges_points(&vertices, &bulges, closed, 64)
         } else {
@@ -751,7 +836,11 @@ fn scan_hatch_polyline_paths(
                 "scanned HATCH path is too short",
             ));
         }
-        paths.push(HatchPath { closed, points });
+        paths.push(HatchPath {
+            closed,
+            points,
+            boundary,
+        });
     }
 
     Ok(paths)
@@ -786,7 +875,7 @@ fn score_hatch_candidate(entity: &HatchEntity) -> i32 {
             if !x.is_finite() || !y.is_finite() {
                 return i32::MIN / 4;
             }
-            if x.abs() > 1.0e9 || y.abs() > 1.0e9 {
+            if x.abs() > HATCH_COORDINATE_LIMIT || y.abs() > HATCH_COORDINATE_LIMIT {
                 return i32::MIN / 4;
             }
         }
@@ -826,6 +915,17 @@ fn require_plausible_hatch_point(point: (f64, f64), context: &str) -> Result<()>
     ))
 }
 
+/// A length (a radius) can be as large as a coordinate.
+fn require_plausible_hatch_length(value: f64, context: &str) -> Result<()> {
+    if value.is_finite() && value.abs() <= HATCH_COORDINATE_LIMIT {
+        return Ok(());
+    }
+    Err(DwgError::new(
+        ErrorKind::Format,
+        format!("implausible HATCH {context}: {value}"),
+    ))
+}
+
 fn require_plausible_hatch_scalar(value: f64, context: &str) -> Result<()> {
     if value.is_finite() && value.abs() <= 1.0e8 {
         return Ok(());
@@ -836,8 +936,19 @@ fn require_plausible_hatch_scalar(value: f64, context: &str) -> Result<()> {
     ))
 }
 
+/// Largest coordinate a boundary point of a HATCH is taken at its word for.
+///
+/// A drawing in a national grid drawn in millimetres reaches 1.5e8 (150 km from
+/// the origin of the zone); at 1e8 the fills of such a drawing were refused as
+/// implausible. Bytes read at a wrong bit offset mostly come out far outside
+/// this range.
+const HATCH_COORDINATE_LIMIT: f64 = 1.0e12;
+
 fn is_plausible_hatch_point(point: (f64, f64)) -> bool {
-    point.0.is_finite() && point.1.is_finite() && point.0.abs() <= 1.0e8 && point.1.abs() <= 1.0e8
+    point.0.is_finite()
+        && point.1.is_finite()
+        && point.0.abs() <= HATCH_COORDINATE_LIMIT
+        && point.1.abs() <= HATCH_COORDINATE_LIMIT
 }
 
 /// A tangent component is 0 or a sane magnitude; the bytes of a following edge
@@ -972,7 +1083,7 @@ fn close_path_if_needed(points: &mut Vec<(f64, f64)>) {
     }
 }
 
-/// Read a HATCH spline boundary edge and sample it as a polyline.
+/// Read a HATCH spline boundary edge, retaining its definition and sampled points.
 ///
 /// Layout (ODA spec, edge type 4): BL degree, B rational, B periodic,
 /// BL knot count, BL control point count, BD knots, 2RD control points
@@ -985,11 +1096,11 @@ fn close_path_if_needed(points: &mut Vec<(f64, f64)>) {
 /// path. Reading 32 bytes of tangents there shifted every following field, so
 /// the tangents are consumed only when fit points exist or when the next 4
 /// doubles look like a tangent pair.
-fn spline_edge_points(
+fn read_spline_edge(
     reader: &mut BitReader<'_>,
     has_fit_points: bool,
     debug: bool,
-) -> Result<Vec<(f64, f64)>> {
+) -> Result<(Vec<(f64, f64)>, HatchEdge)> {
     let degree = bounded_count(reader.read_bl()?, "hatch spline degree")?;
     if degree > 25 {
         return Err(DwgError::new(
@@ -998,7 +1109,7 @@ fn spline_edge_points(
         ));
     }
     let rational = reader.read_b()? != 0;
-    let _periodic = reader.read_b()? != 0;
+    let periodic = reader.read_b()? != 0;
     let num_knots = bounded_count(reader.read_bl()?, "hatch spline knots")?;
     let num_control = bounded_count(reader.read_bl()?, "hatch spline control points")?;
     if debug {
@@ -1020,6 +1131,8 @@ fn spline_edge_points(
         }
     }
     let mut fit_points = Vec::new();
+    let mut start_tangent = None;
+    let mut end_tangent = None;
     if has_fit_points {
         let num_fit = bounded_count(reader.read_bl()?, "hatch spline fit points")?;
         for _ in 0..num_fit {
@@ -1037,8 +1150,8 @@ fn spline_edge_points(
             })
         };
         if tangents_present {
-            let _start_tangent = read_point2rd(reader)?;
-            let _end_tangent = read_point2rd(reader)?;
+            start_tangent = Some(read_point2rd(reader)?);
+            end_tangent = Some(read_point2rd(reader)?);
         }
         if debug {
             eprintln!(
@@ -1047,15 +1160,32 @@ fn spline_edge_points(
             );
         }
     }
-    if control.len() >= 2 {
-        if let Some(points) = sample_bspline(&control, &weights, &knots, degree) {
-            return Ok(points);
+    let points = if control.len() >= 2 {
+        sample_bspline(&control, &weights, &knots, degree)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| {
+        if fit_points.len() >= 2 {
+            fit_points.clone()
+        } else {
+            control.clone()
         }
-    }
-    if fit_points.len() >= 2 {
-        return Ok(fit_points);
-    }
-    Ok(control)
+    });
+    Ok((
+        points,
+        HatchEdge::Spline {
+            degree: degree as u32,
+            rational,
+            periodic,
+            knots,
+            control_points: control,
+            weights,
+            fit_points,
+            start_tangent,
+            end_tangent,
+        },
+    ))
 }
 
 /// Uniform parameter sampling of a (rational) B-spline with Cox-de Boor basis.
@@ -1381,6 +1511,7 @@ mod tests {
             paths: vec![HatchPath {
                 closed: true,
                 points: vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+                boundary: HatchBoundary::Edges(Vec::new()),
             }],
             pattern: None,
         };
@@ -1390,10 +1521,12 @@ mod tests {
                 HatchPath {
                     closed: true,
                     points: Vec::new(),
+                    boundary: HatchBoundary::Edges(Vec::new()),
                 },
                 HatchPath {
                     closed: true,
                     points: Vec::new(),
+                    boundary: HatchBoundary::Edges(Vec::new()),
                 },
             ],
             ..real.clone()
@@ -1435,8 +1568,16 @@ mod tests {
         writer.write_rd(Endian::Little, 5.0).unwrap();
         let bytes = writer.into_bytes();
         let mut reader = BitReader::new(&bytes);
-        let points = spline_edge_points(&mut reader, true, false).expect("spline edge");
+        let (points, edge) = read_spline_edge(&mut reader, true, false).expect("spline edge");
         assert_eq!(points.first().copied(), Some((0.0, 0.0)));
+        assert!(matches!(
+            edge,
+            HatchEdge::Spline {
+                start_tangent: None,
+                end_tangent: None,
+                ..
+            }
+        ));
         assert_eq!(
             reader.read_rc().unwrap(),
             1,
@@ -1456,7 +1597,15 @@ mod tests {
         writer.write_rc(2).unwrap();
         let bytes = writer.into_bytes();
         let mut reader = BitReader::new(&bytes);
-        spline_edge_points(&mut reader, true, false).expect("spline edge");
+        let (_, edge) = read_spline_edge(&mut reader, true, false).expect("spline edge");
+        assert!(matches!(
+            edge,
+            HatchEdge::Spline {
+                start_tangent: Some((1.0, 0.0)),
+                end_tangent: Some((0.0, 1.0)),
+                ..
+            }
+        ));
         assert_eq!(reader.read_rc().unwrap(), 2, "tangent pair was consumed");
     }
 
@@ -1484,7 +1633,19 @@ mod tests {
         writer.write_rc(3).unwrap();
         let bytes = writer.into_bytes();
         let mut reader = BitReader::new(&bytes);
-        spline_edge_points(&mut reader, true, false).expect("spline edge");
+        let (_, edge) = read_spline_edge(&mut reader, true, false).expect("spline edge");
+        let HatchEdge::Spline {
+            fit_points,
+            start_tangent,
+            end_tangent,
+            ..
+        } = edge
+        else {
+            panic!("spline definition");
+        };
+        assert_eq!(fit_points, vec![(5.0, 0.0)]);
+        assert_eq!(start_tangent, Some((1.0, 0.0)));
+        assert_eq!(end_tangent, Some((1.0, 0.0)));
         assert_eq!(reader.read_rc().unwrap(), 3);
     }
 }

@@ -30,8 +30,8 @@ BOUNDARY = [
     (-0.47617156637515023, -HALF),
 ]
 # The corners of the mask in world coordinates, in the order of BOUNDARY:
-# where a DXF library places the boundary that an independent converter
-# writes for the sample.
+# where a DXF library places the boundary that an independent DWG to DXF
+# converter, used as a program only, writes for the sample.
 WORLD_CORNERS = [
     (271.9211288808192, 3.988123351850959),
     (298.1133448313244, 4.239771779512582),
@@ -105,9 +105,13 @@ def test_raw_wipeout_rows() -> None:
         clipping,
         levels,
         clip_type,
-        clip_mode,
         clip_vertices,
+        clip_mode,
     ) = rows[0]
+    # The fields of the IMAGE row up to the clip vertices, then the clip mode.
+    (image,) = raw.decode_image_entities(str(SAMPLES["AC1032"]))
+    assert len(rows[0]) == len(image) - 1
+    assert [type(value) for value in rows[0][:10]] == [type(value) for value in image[:10]]
     assert handle == WIPEOUT_HANDLE
     assert insert == pytest.approx((271.9211288808192, 3.988123351850959, 0.0))
     assert u_vector == pytest.approx((FRAME, 0.0, 0.0))
@@ -116,6 +120,7 @@ def test_raw_wipeout_rows() -> None:
     assert (display_props, clipping, levels) == (7, True, (50, 50, 0))
     assert (clip_type, clip_mode) == (2, 0)
     assert clip_vertices == BOUNDARY
+    assert raw.decode_wipeout_entities(str(SAMPLES["AC1032"]), limit=0) == []
 
 
 def test_drawing_without_a_wipeout_gives_no_rows(tmp_path) -> None:
@@ -163,7 +168,7 @@ def test_wipeout_with_a_number_that_is_not_finite_is_dropped(tmp_path, bad: floa
     moved = tmp_path / "moved.dwg"
     moved.write_bytes(_with_raw_double(source, vertex_x, 0.125))
     (row,) = raw.decode_wipeout_entities(str(moved))
-    assert row[10][1] == (0.125, BOUNDARY[1][1])
+    assert row[9][1] == (0.125, BOUNDARY[1][1])
 
     broken = tmp_path / "broken.dwg"
     broken.write_bytes(_with_raw_double(source, vertex_x, bad))
@@ -275,8 +280,8 @@ def test_to_dxf_leaves_a_wipeout_out_of_the_block_it_writes(monkeypatch, tmp_pat
         True,
         (50, 50, 0),
         1,
-        0,
         [(-HALF, -HALF), (HALF, HALF)],
+        0,
     )
     monkeypatch.setattr(patched_raw, "decode_wipeout_entities", lambda _path, limit=None: [mask])
 

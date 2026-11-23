@@ -261,7 +261,9 @@ def _written_attribute_values(
     block.add_attdef("DEF", text, (0, 0, 0), height, prompt="p")
     ref = doc.modelspace().add_blockref("B1", (5, 5, 0))
     doc.modelspace().add_attrib(ref, "TAG", text, (5, 5, 0), height)
-    path = tmp_path / "attrib.dwg"
+    # A new name for each drawing: the reader caches a file by its path, size
+    # and modification time, and two can be written in one clock tick.
+    path = tmp_path / f"attrib_{len(list(tmp_path.iterdir()))}.dwg"
     doc.save(path)
 
     return {
@@ -294,7 +296,8 @@ def test_attribute_without_an_exact_layout_still_passes_the_candidate_check(
     """R2000 has no exact layout: its reader applies the check as before."""
     values = _written_attribute_values(tmp_path, "AC1015", "T1", 2.5)
     assert values == {"DEF": ("T1", 2.5), "TAG": ("T1", 2.5)}
-    # The check takes a symbol on its own for noise.
+    # A known limit, not a wanted result: with no exact layout the check
+    # still takes a symbol on its own for noise and drops the record.
     assert _written_attribute_values(tmp_path, "AC1015", "\u00b0", 2.5) == {}
 
 

@@ -83,7 +83,7 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
     // Assigned at each Handles-page boundary before first use (absolute first
     // handleoff/offset). Leave uninitialised so rustc does not warn about a
     // dead initial write that is always overwritten.
-    let mut last_handle: i64;
+    let mut last_handle: u64;
     let mut last_offset: i64;
     loop {
         if reader.remaining() < 2 {
@@ -131,7 +131,7 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
                 DwgError::new(ErrorKind::Format, "object map offset overflow")
                     .with_offset(reader.tell())
             })?;
-            if last_handle < 0 || last_offset < 0 {
+            if last_offset < 0 {
                 return Err(DwgError::new(
                     ErrorKind::Format,
                     "object map contains negative handle/offset",
@@ -146,7 +146,7 @@ fn parse_object_map(bytes: &[u8], _config: &ParseConfig) -> Result<ObjectIndex> 
                 .with_offset(reader.tell()));
             }
             objects.push(ObjectRef {
-                handle: Handle(last_handle as u64),
+                handle: Handle(last_handle),
                 offset: last_offset as u32,
             });
         }
@@ -173,26 +173,43 @@ fn read_u16_be(reader: &mut ByteReader<'_>) -> Result<u16> {
 /// terminating byte with bit 0x40 set into a negative delta, which shifted the
 /// handles of all following entries in that section (and dropped entries as
 /// "negative"), so objects were indexed under the wrong handles.
-fn read_unsigned_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
-    let mut value: i64 = 0;
-    let mut shift = 0;
+///
+/// A value runs until the byte without the continuation bit. A handle is an
+/// unsigned 64-bit value, so a delta can take up to ten bytes: nine groups of
+/// seven bits and one last bit. A drawing whose handles jump above 2^35 writes
+/// six or more; one with handles at or above 2^63 writes ten. Stopping early
+/// left the rest of the value unread, and every following entry and page of
+/// the map was read out of step ("object map block exceeds remaining data").
+/// The R2004 and R2007 object maps use the same two readers.
+pub(crate) fn read_unsigned_modular_char(reader: &mut ByteReader<'_>) -> Result<u64> {
+    let mut value: u64 = 0;
 
-    for _ in 0..5 {
+    for group in 0..10 {
         let byte = reader.read_u8()?;
-        value |= ((byte & 0x7F) as i64) << shift;
+        let bits = (byte & 0x7F) as u64;
+        // The tenth group holds bit 63 only.
+        if group == 9 && bits > 1 {
+            break;
+        }
+        value |= bits << (group * 7);
         if (byte & 0x80) == 0 {
             return Ok(value);
         }
-        shift += 7;
     }
-    Ok(value)
+    Err(
+        DwgError::new(ErrorKind::Format, "object map handle delta is too long")
+            .with_offset(reader.tell()),
+    )
 }
 
-fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
+/// Signed modular char: the last byte carries the sign in bit 0x40. As with the
+/// unsigned form, the value runs until the byte without the continuation bit;
+/// an offset delta of 32 bits takes five bytes.
+pub(crate) fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
     let mut value: i64 = 0;
     let mut shift = 0;
 
-    for _ in 0..4 {
+    for _ in 0..9 {
         let mut byte = reader.read_u8()?;
         if (byte & 0x80) == 0 {
             let negative = (byte & 0x40) != 0;
@@ -209,7 +226,10 @@ fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
         value |= (byte as i64) << shift;
         shift += 7;
     }
-    Ok(value)
+    Err(
+        DwgError::new(ErrorKind::Format, "object map offset delta is too long")
+            .with_offset(reader.tell()),
+    )
 }
 
 #[cfg(test)]
@@ -268,5 +288,41 @@ mod tests {
         // handle: 1, 3, then reset -> 7, 9
         // offset: 10, 14, then reset -> 8, 11
         assert_eq!(refs, vec![(1, 10), (3, 14), (7, 8), (9, 11)]);
+    }
+
+    #[test]
+    fn handle_deltas_longer_than_five_bytes_keep_the_map_in_step() {
+        // Handles above 2^35 need a six-byte delta. Reading only five bytes left
+        // the sixth for the offset and shifted every later entry and page.
+        let bytes = vec![
+            0x00, 0x0E, // block 1: 2-byte header + 12-byte payload
+            0x05, 0x0A, // handle 5, offset 10
+            // +0xF_FFFF_FFFA (36 bits) in six bytes, offset +4
+            0xFA, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x04, //
+            0x01, 0x82, 0x01, // +1, offset +130 (two bytes)
+            0x00, 0x00, // crc
+            0x00, 0x04, // block 2
+            0x07, 0x08, // abs 7, +8
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator block
+        ];
+        let config = ParseConfig::default();
+        let index = parse_object_map(&bytes, &config).expect("index");
+        let refs: Vec<(u64, u32)> = index
+            .objects
+            .iter()
+            .map(|obj| (obj.handle.0, obj.offset))
+            .collect();
+        assert_eq!(
+            refs,
+            vec![(5, 10), (0xF_FFFF_FFFF, 14), (0x10_0000_0000, 144), (7, 8)]
+        );
+        // A value whose continuation bit never clears is an error, not a
+        // silent stop in the middle of the value.
+        let endless = vec![
+            0x00, 0x0E, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01,
+            0x00, 0x00, 0x00, 0x02,
+        ];
+        assert!(parse_object_map(&endless, &config).is_err());
     }
 }

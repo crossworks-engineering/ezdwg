@@ -3,124 +3,93 @@
 ## Unreleased
 
 ### DWG reader
-- WIPEOUT entities are read (R2000 and later; R13 and R14 are not, as for
-  IMAGE): `Document` layouts return them as `WIPEOUT` with the placement frame
-  and the clip boundary, which is the masked area, and
-  `raw.decode_wipeout_entities` gives the rows. The record is the one of IMAGE
-  without an image definition. Until now these entities were not returned at
-  all. Best effort drops a WIPEOUT whose frame or boundary holds a number that
-  is not finite; the `limit` of `raw.decode_wipeout_entities` counts the rows
-  it returns, not a dropped record. For a drawing with a WIPEOUT this also
-  changes:
-  - `entities()` and the layouts return the WIPEOUT rows after the IMAGE rows
-    and before the TOLERANCE rows.
-  - The writers do not know the type. `to_dxf` with `include_unsupported=True`
-    or with a `types` filter that matches WIPEOUT counts each one as skipped,
-    and with `strict=True` it then raises `ValueError`, as for any skipped
-    entity. The default export selects the types it can write, so it does not
-    select a WIPEOUT. A WIPEOUT in a block is left out of the block that
-    `to_dxf` writes, without a count.
-  - `ezdwg inspect` prints `WIPEOUT: n` where it printed `raw_only[WIPEOUT]: n`.
-  - The style rows now hold each WIPEOUT. The layer color heuristic for
-    AC1024, AC1027 and AC1032 drawings counts the entities of a layer over
-    those rows, so a WIPEOUT counts there like any other entity and can change
-    what the heuristic decides.
-- MULTILEADER entities are read (R2000 to R2018; R13 and R14 are not):
+- The R2004 section map reader (AC1018, AC1024, AC1027, and AC1032) checks
+  section and page counts before allocating memory. A malformed count now
+  returns a format error. The page and section maps also honor the configured
+  section size limit during decompression. Thanks to Jinquan for reporting
+  the allocation issue.
+- Coordinates beyond 1e8 are read: a drawing in a national grid drawn in
+  millimetres is up to 1.5e8 from the origin. A `LINE` that far out was taken
+  for a record decoded at a wrong offset and the bytes read without the object
+  type were used instead, so every line of such a drawing came out with
+  coordinates like `(1.0, 0.0)` or `1e-168`; a `HATCH` with a boundary point
+  that far out was refused, so its fills were missing. The limit is now 1e12
+  for both, and a `LINE` with a denormal coordinate (below 1e-100) is no longer
+  accepted as plausible. The writer was not affected: the files it wrote hold
+  the right coordinates (the ODA File Converter reads them back).
+- `raw.decode_object_eed(path)` returns the extended data (DXF XDATA) of every
+  object that has any, entities and non-graphical objects alike, as
+  `(handle, [(app_handle, app_name, [(group_code, value)])])` in object map
+  order. `app_name` is `None` when the APPID handle names no APPID record.
+- EED handles (group codes 1003 and 1005) are read big-endian. They were read
+  little-endian, so `raw.decode_layer_eed` returned them byte-reversed.
+- R2010+: table record names, including APPID names, were not found. They are
+  read from the string stream, using the data end in the object header.
+- R2004+: the owned object count of a BLOCK_HEADER is read only for a block
+  that is neither an xref nor an overlay, the only blocks it is written for.
+  Reading it for every block misaligned an xref's record, so
+  `raw.decode_write_blocks` dropped the block and the R2010+ block header
+  readers failed on it. `raw.decode_write_blocks` rows also carry `xref`,
+  `overlay` and `xref_path`.
+- `raw.decode_spatial_filters(path)` returns each SPATIAL_FILTER, the clip
+  boundary XCLIP sets on an INSERT: its points, plane, display flag, front and
+  back clipping, both 12-real transforms, and the dictionary that owns it.
+- `raw.decode_dictionary_owners(path)` returns each DICTIONARY's owner and
+  entries (R2000 and later). Following the owners leads from a filter to the
+  INSERT it clips.
+- `$XCLIPFRAME` is read with the header variables on R2004 and later. If the
+  read fails after INSUNITS, it is `None` and the variables before it are kept.
+  The raw reader preserves its eleven-element tuple by default; request
+  `include_xclipframe=True` to append the value. The high-level dictionary
+  includes it automatically.
+- `raw.decode_table_placements(path)` returns each ACAD_TABLE's insertion
+  point, scale, rotation, extrusion and the `*T` block it draws. A table
+  record begins as an INSERT does, so the INSERT decoder reads it.
+- `raw.decode_hatch_boundaries(path)` returns each HATCH boundary path before
+  flattening: a polyline with its bulges, or a list of line, arc, ellipse and
+  spline edges. Spline definitions retain their degree, knots, control
+  points, weights, fit points and optional tangents. `HatchPath` keeps the
+  flattened points.
+- Reject truncated or non-finite SPATIAL_FILTER data before returning a
+  clipping boundary, and check point counts before allocating memory.
+- Keep R2007+ ATTRIB/ATTDEF records read at their exact layout when their
+  numbers are finite, including lone symbols, private-use characters and
+  text heights below 1e-8. Fallback readers retain the plausibility check.
+- `raw.decode_entity_proxy_graphics(path, handles, limit=None)` returns the
+  proxy graphic of entities by handle: the bytes an application stored in the
+  record so that a program without the code of the entity can still draw it.
+  R14 to R2018. Rows follow the requested handle order; `None` means no
+  proxy graphic, and an omitted row means the entity was not read. Truncated
+  proxy graphics are rejected before copying their bytes.
+- MULTILEADER entities are read (R2000 to R2018; R13 and R14 are not).
   `Document` layouts return them as `MULTILEADER`, and
-  `raw.decode_mleader_entities` gives the rows. A row holds the leaders with
-  their lines and points, the arrowhead and its size, the landing and dogleg
-  values, and the label: a text with its place, height, rotation, width and
-  style, or a block with its place, its matrix and its attribute texts. Until
-  now these entities were not returned at all. No description of the record
-  was used: each field was placed by comparing records with what an
-  independent reader prints for them. The evidence, by version:
-  - R2013 and R2018: the sample drawing of `test_dwg/acadsharp` (15 objects
-    in each version) and 964 objects of 236 production drawings (271 in 57
-    R2013 drawings, 693 in 179 R2018 drawings). Every object decodes, and
-    every value that reader prints for a returned field equals the row. That
-    comparison ends in front of the block attributes: that reader prints no
-    attribute text. The attribute text rests on three other things: the walk
-    of each record ends exactly, the attribute handle of each of the 962
-    block labels is an attribute definition, and the text of each of the 962
-    equals the text in the saved picture of the same object.
-  - R2000, R2007 and R2010: the sample drawing only, 15 objects in each,
-    equal to that reader.
-  - R2004: the sample drawing only, 15 objects. That reader does not give
-    them; the rows equal the R2007 rows.
-  - What the objects are: all have one leader with one line of one point.
-    The label is a text on the sample's objects and on 2 production objects,
-    and a block with one attribute on 962 production objects. No object has
-    a label of another kind, and none has a spline leader line. So a block
-    label is proven for R2013 and R2018 only; for the older versions it is
-    read on records that the tests build.
-  What that evidence does not hold is not claimed:
-  - More than one leader, line, point or block attribute is read as a
-    repeat of the one that is proven. No drawing proves the repeat. For
-    block attributes the rule that a record must end exactly is no guard: an
-    attribute takes its definition handle, its numbers and its text from
-    three streams, every stream would still end exactly with the parts
-    paired wrongly, and nothing checks the pairing.
-  - A record with a break in a leader or in a leader line, with a text column
-    height, or (before R2010) with an entry in the two lists at its end is
-    not returned: how those items are stored is not known.
-  A record that does not decode is left out, as for the other types in best
-  effort, and `ezdwg inspect` counts it under `decode_gap[MULTILEADER]`. A
-  record is returned only when its layout ends exactly where its data, its
-  strings and its handles end. Best effort drops a MULTILEADER that holds a
-  number that is not finite (in Rust, `MLeaderEntity::has_finite_numbers`
-  says so); the `limit` of `raw.decode_mleader_entities` counts the rows it
-  returns. For a drawing with a MULTILEADER this also
-  changes:
-  - `entities()` and the layouts return the MULTILEADER rows after the
-    LEADER rows and before the HATCH rows.
-  - The writers do not know the type. `to_dxf` with `include_unsupported=True`
-    or with a `types` filter that matches MULTILEADER counts each one as
-    skipped, and with `strict=True` it then raises `ValueError`, as for any
-    skipped entity. The default export selects the types it can write, so it
-    does not select a MULTILEADER. A MULTILEADER in a block is left out of
-    the block that `to_dxf` writes, without a count.
-  - `ezdwg inspect` prints `MULTILEADER: n` where it printed
-    `raw_only[MULTILEADER]: n`. For an R13 or R14 drawing it prints
-    `decode_gap[MULTILEADER]: n` in that place.
-  - The style rows now hold each MULTILEADER, so it counts in the layer color
-    heuristic for AC1024, AC1027 and AC1032 drawings like any other entity.
-- `raw.decode_entity_proxy_graphics(path, handles)` returns the saved picture
-  (proxy graphic) of entities: the bytes an application stored in the record
-  so that a program without the code of the entity can still draw it. They
-  are the bytes a DXF file of the drawing carries as the proxy graphic of
-  the entity. One row `(handle, bytes)` for each handle asked whose record
-  is an entity and reads, in the order asked; the bytes are `None` when the
-  entity has no saved picture. The bytes are returned as stored and are not
-  looked into. R14 to R2018; R13 is not read and gives no rows. In Rust:
-  `entities::common::read_entity_proxy_graphic` and `ProxyGraphicLayout`.
-  - The size of a picture is checked against the bits the record has left
-    before a byte is copied. A picture that runs past its record, a record
-    that holds another handle than the one asked, and an object that is not
-    an entity give no row. The handles asked less the rows returned is the
-    count of the handles that were not read.
-  - No description of the record was used: the place of the picture was
-    found by comparing the bytes with the proxy graphic that an independent
-    reader writes into a DXF file for the same entity. The evidence is the
-    sample drawing of `test_dwg/acadsharp`, which has 22 entities with a
-    saved picture in each version (15 MULTILEADER, 2 ACAD_TABLE, 2 MESH, an
-    IMAGE, a WIPEOUT and a PDF underlay). R2000, R2007, R2010, R2013 and
-    R2018: the bytes of 20 entities equal that reader's; it gives no
-    picture for the 2 ACAD_TABLE. R2004: that reader gives none of the
-    entities; the pictures of 5 entities equal the R2000 bytes of the same
-    entities, and the 15 MULTILEADER pictures have the same lengths as in
-    R2000. R14: one picture equals that reader's, and the rest compare with
-    R2000 as for R2004. In every version each of the other entities of the
-    sample reads as an entity without a saved picture, and that reader
-    gives no picture for them either.
-  - On 1,279 production drawings (R2013 and R2018) every one of the 26,074
-    saved pictures (964 MULTILEADER, 25,110 WIPEOUT) equals that reader's
-    bytes, no entity has a picture for one of the two readers only, and all
-    5,183,174 entities read.
-- A class-based type (IMAGE, IMAGEDEF, WIPEOUT) matches on its class name
-  only. An object whose type code reads as 0 was taken for each of them.
-- IMAGE and WIPEOUT: a clip boundary whose vertex count is larger than the
-  rest of the record fails before memory is reserved for the vertices. It
-  failed before as well, after reserving up to 16 MB.
+  `raw.decode_mleader_entities` gives the rows: the leaders with their lines
+  and points, the arrowhead, the landing and dogleg values, and the label, a
+  text or a block with its attribute texts. The decoder checks the ends of
+  all three record streams and rejects unsupported structures. See the
+  entity guide for the supported layouts and evidence limits.
+- WIPEOUT entities are read (R2000 and later; R13 and R14 are not, as for
+  IMAGE). `Document` layouts return them as `WIPEOUT` with the placement
+  frame and the clip boundary, which is the masked area, and
+  `raw.decode_wipeout_entities` gives the rows: the fields of the IMAGE row up
+  to the clip vertices, then the clip mode.
+- WIPEOUT and MULTILEADER are read only. `to_dxf` counts explicitly selected
+  entities of these types as skipped and raises in strict mode. Style rows
+  include the new types; best effort drops entities with non-finite numbers.
+  Their raw readers and `decode_entity_proxy_graphics` return no rows for
+  `limit=0`.
+- A class-based type (IMAGE, IMAGEDEF, WIPEOUT, MULTILEADER) matches on its
+  class name only. An object whose type code reads as 0 was taken for an
+  IMAGE and for an IMAGEDEF.
+- IMAGE: reject clip boundaries larger than the remaining record before
+  reserving memory, including a vertex with an incomplete final byte.
+- R2004: a class whose DWG or maintenance version is above 255 no longer
+  costs the drawing its class names. The two fields are bit longs, as in the
+  later versions, and were read as bit shorts, so the classes after such a
+  class were read out of step and the drawing lost or garbled its class
+  names. This also applies to the fallback class reader for R2010 to R2018.
+  ACIS candidate diagnostics based on unresolved class names may change;
+  recognized history objects no longer appear as unknown ACIS candidates.
 - The per-entity tables that a read keeps until `clear_decode_caches()`
   (placements, colors, linetypes, lineweights, layers, thickness/extrusion/
   elevation, MTEXT write properties, insert owners) share one object per
@@ -129,13 +98,6 @@
   entities the peak of reading one into cad2d-ir falls by 15 % (638 → 540 MB,
   808 → 691 MB); building the tables takes about 0.3 s longer. `0.0` and
   `-0.0` are kept apart. The values are unchanged.
-- R2004: a class whose DWG or maintenance version is above 255 no longer
-  costs the drawing its class names. The two fields are bit longs, as in the
-  later versions, and were read as bit shorts, so the classes after such a
-  class were read out of step and the drawing lost or garbled its class
-  names. In the sample drawing of the repository every class-based object was
-  `UNKNOWN(...)` and none of the entities of those classes (IMAGE, for one)
-  was returned.
 - Query present type names and type-specific handles directly from the shared
   Rust catalog. High-level type discovery and handle lookups no longer transfer
   or scan the complete object-header table in Python. Add
@@ -168,31 +130,20 @@
   when the next four doubles look like a tangent pair.
 - A HATCH whose every decode candidate lacks a usable boundary is reported as a
   decode failure instead of an entity with empty paths.
-- ATTRIB/ATTDEF of R2007 and later: a record read at its exact layout is
-  returned when its numbers are finite. The plausibility check that guards the
-  candidate search was also applied to these records and dropped real values:
-  a symbol on its own (a degree sign), a character of a symbol font in the
-  private use area, a C1 control character, or a text height below 1e-8. No
-  text rule and no range of the check applies to such a record now (the text,
-  tag and prompt rules, the range of every number, the generation, the ranges
-  of the flags and alignments); only a number that is not finite still drops
-  it. The exact layout keeps its own rules: it does not take a record with an
-  empty tag, a tag that holds a control character, or a text height that is
-  not above 0. On 1,279 production drawings (R2013 and R2018)
-  272 attributes of 60 drawings were dropped this way and are read now;
-  nothing else in what the reader returns changes. The whole check still
-  applies to the fallback readers: the candidate search, and the versions
-  before R2007, which have no exact layout.
 
 ### Rust crate distribution
 - New public module `entities::mleader`: `decode_mleader` (R2000 and R2004),
   `decode_mleader_r2007`, `decode_mleader_r2010`, `decode_mleader_r2013`
   (also R2018), and the types `MLeaderEntity`, `MLeaderContext`,
   `MLeaderRoot`, `MLeaderLine`, `MLeaderText`, `MLeaderBlock`,
-  `MLeaderAttribute` and `MLeaderColor`.
+  `MLeaderAttribute` and `MLeaderColor`. `MLeaderEntity::has_finite_numbers`
+  says whether every number of the record is finite.
 - New public method `entities::ImageEntity::has_finite_numbers`: whether every
   number of the placement frame and of the clip boundary is finite. The
   WIPEOUT rows of the Python reader use it.
+- New public function `entities::common::read_entity_proxy_graphic` and type
+  `entities::common::ProxyGraphicLayout`: the proxy graphic of an entity
+  record, read from the start of its common entity data.
 - `writer::WriterEntity` boxes its large variants (`Spline`, `Face3d`,
   `Insert`, `Attdef`, `Attrib`, `Hatch`, `Dimension`, `Image`, `Viewport`),
   so the enum is 328 bytes instead of 568 and a document of a million lines
@@ -205,6 +156,13 @@
   to use the local Rust core and the shared workspace version.
 
 ### Native DWG writer
+- Adding an entity to a `Drawing` no longer looks its new handle up in every
+  layout and block. A handle the drawing allocates is past every handle it has
+  held, so only a handle passed with `handle=` can collide, and only that one
+  is still checked (`duplicate entity handle`). The lookup made building a
+  drawing with many block definitions cost the number of entities times the
+  number of blocks, and such a drawing spent most of its time there. The saved
+  file is the same, byte for byte.
 - (0.18.0, extended in 0.18.1) Saving a large drawing no longer builds every
   Python-side copy of every entity at once, nor a Rust document of every
   entity. `to_dwg` /

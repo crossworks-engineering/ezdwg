@@ -154,6 +154,7 @@ _HEADER_VARIABLE_KEYS = (
     "extmax",
     "limmin",
     "limmax",
+    "xclipframe",
 )
 
 
@@ -341,10 +342,13 @@ class Document:
 
         Keys: ``insunits``, ``lunits``, ``luprec``, ``aunits``, ``auprec``,
         ``ltscale``, ``textsize``, ``extmin``, ``extmax``, ``limmin``,
-        ``limmax``. Values are ``None`` when the variable is absent for the
-        file version (R14 has no ``$INSUNITS``).
+        ``limmax``, ``xclipframe``. Values are ``None`` when the variable is
+        absent for the file version (R14 has no ``$INSUNITS``, R2000 no
+        ``$XCLIPFRAME``).
         """
-        row = raw.decode_header_variables(self.decode_path or self.path)
+        row = raw.decode_header_variables(
+            self.decode_path or self.path, include_xclipframe=True
+        )
         return dict(zip(_HEADER_VARIABLE_KEYS, row))
 
     def linetypes(self) -> dict[str, dict[str, Any]]:
@@ -2384,6 +2388,12 @@ def _decode_mtext_plain_text(value: str) -> str:
                 continue
         if code == "S":
             i += 2
+            # CAXA writes the height of the stacked characters behind \S
+            # (``\S\H0.7x;2^;``); it is no part of the stack.
+            if value.startswith(("\\H", "\\h"), i):
+                end = value.find(";", i)
+                if end != -1:
+                    i = end + 1
             stacked: list[str] = []
             while i < n and value[i] != ";":
                 token = value[i]
@@ -2594,8 +2604,8 @@ def _wipeout_dxf(row: tuple) -> tuple[int, dict]:
         clipping,
         (brightness, contrast, fade),
         clip_type,
-        clip_mode,
         clip_vertices,
+        clip_mode,
     ) = row
     return (
         handle,
@@ -3987,6 +3997,11 @@ def _line_arc_circle_rows(
     )
 
 
+# A drawing in a national grid drawn in millimetres reaches 1.5e8; a line that
+# far out is a real one, not a row decoded at a wrong offset.
+_LINE_COORDINATE_LIMIT = 1.0e12
+
+
 def _has_implausible_line_rows(
     line_rows: list[tuple[int, float, float, float, float, float, float]],
 ) -> bool:
@@ -3997,7 +4012,7 @@ def _has_implausible_line_rows(
         values = (sx, sy, sz, ex, ey, ez)
         if any(not math.isfinite(value) for value in values):
             return True
-        if max(abs(value) for value in values) > 1.0e8:
+        if max(abs(value) for value in values) > _LINE_COORDINATE_LIMIT:
             return True
     return False
 

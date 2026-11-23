@@ -1,32 +1,24 @@
 //! MULTILEADER: a class-based leader whose label is a text or a block.
 //!
-//! No description of the record was used. Each field was placed by matching
-//! the values that an independent reader prints for an object with the bits
-//! of its record: on the sample drawing of `test_dwg/acadsharp` (15 objects
-//! in each of R2000, R2004, R2007, R2010, R2013 and R2018) and on 964 objects
-//! of production drawings (R2013 and R2018). A walk of the layout below ends
-//! exactly at the end of the data, of the string stream and of the handle
-//! stream on every one of those objects, and `decode_mleader*` returns a
-//! record only when its walk ends that way.
+//! The layout rests on a comparison, not on a description of the record.
+//! Fields were placed by matching the bits of records with the values that
+//! an independent DWG to DXF converter, used as a program only, writes for
+//! the same objects, and by the order of the public DXF reference.
+//! `decode_mleader*` returns a record only when its walk ends exactly at the
+//! end of the data, of the string stream and of the handle stream.
 //!
-//! Limits of that evidence, which the decoder keeps:
-//! - Every object has one leader with one line of one point, and every
-//!   block label has one attribute. More leaders, lines, points and
-//!   attributes are read as a plain repeat; no drawing proves it.
-//! - An attribute of a block label takes its definition from the handle
-//!   stream, its numbers from the data and its text from the string stream.
-//!   The walk checks that each stream ends exactly. It does not check that
-//!   the three parts of one attribute belong together: with two attributes
-//!   or more, a wrong pairing would still end exactly.
-//! - A block label is in the production drawings only, so it is proven for
-//!   R2013 and R2018. For the older layouts it is read on records that the
-//!   tests build.
-//! - No object has a break in a leader or in a leader line, or a text column
-//!   height, and
-//!   before R2010 no object has an entry in the two lists of the tail. The
-//!   layout of those items is not known: a record that states one is refused.
-//! - Fields with one value in all the evidence are walked and, unless a
-//!   picture needs them, not returned (see the notes in the walk).
+//! Limits, which the decoder keeps:
+//! - More than one leader, line, point or block attribute is read as a plain
+//!   repeat of the one the compared objects have. For attributes nothing
+//!   checks that the handle, the numbers and the text of one attribute, which
+//!   come from three streams, belong together.
+//! - A block label was compared for R2013 and R2018 only. For the older
+//!   layouts it is read on records that the tests build.
+//! - A break in a leader or in a leader line, a text column height and,
+//!   before R2010, an entry in the two lists of the tail have no known
+//!   layout: a record that states one is refused.
+//! - Fields with one value in all the evidence are walked and not returned
+//!   (see the notes in the walk).
 //! - R13 and R14 are not read.
 use crate::bit::BitReader;
 use crate::core::error::{DwgError, ErrorKind};
@@ -77,6 +69,7 @@ pub struct MLeaderText {
     pub style_handle: u64,
     pub location: Point3,
     pub direction: Point3,
+    /// In radians, as in the DXF MULTILEADER.
     pub rotation: f64,
     pub width: f64,
     pub color: MLeaderColor,
@@ -94,6 +87,7 @@ pub struct MLeaderBlock {
     pub normal: Point3,
     pub location: Point3,
     pub scale: Point3,
+    /// In radians, as in the DXF MULTILEADER.
     pub rotation: f64,
     pub color: MLeaderColor,
     /// The 16 values of the transformation matrix, in stored order (the

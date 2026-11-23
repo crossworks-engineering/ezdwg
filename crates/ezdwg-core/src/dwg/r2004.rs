@@ -9,6 +9,7 @@ use crate::core::result::Result;
 use crate::dwg::version::{detect_version, DwgVersion};
 use crate::entities;
 use crate::io::ByteReader;
+use crate::objects::object_locator::{read_modular_char, read_unsigned_modular_char};
 use crate::objects::object_record::{parse_object_record_owned, parse_object_record_owned_r2010};
 use crate::objects::{Handle, ObjectClass, ObjectIndex, ObjectRecord, ObjectRef};
 
@@ -16,6 +17,9 @@ const HEADER_OFFSET: usize = 0x80;
 const HEADER_SIZE: usize = 0x6c;
 const SECTION_PAGE_MAP_MAGIC: u32 = 0x41630E3B;
 const SECTION_MAP_MAGIC: u32 = 0x4163003B;
+// An eight-byte size, six four-byte fields, and a 64-byte name.
+const SECTION_ENTRY_SIZE: usize = 96;
+const SECTION_PAGE_INFO_SIZE: usize = 16;
 const DATA_SECTION_MAGIC: u32 = 0x4163043B;
 const SENTINEL_CLASSES_BEFORE: [u8; 16] = [
     0x8D, 0xA1, 0xC4, 0xB8, 0xC4, 0xA9, 0xF8, 0xC5, 0xC0, 0xDC, 0xF4, 0x5F, 0xE7, 0xCF, 0xB6, 0x8A,
@@ -42,11 +46,6 @@ struct SystemSectionHeader {
 struct PageMapEntry {
     id: i32,
     address: u64,
-}
-
-#[derive(Debug, Clone)]
-struct SectionMapHeader {
-    section_entry_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -85,10 +84,10 @@ struct R21ClassesHeaderCandidate<'a> {
     score: i32,
 }
 
-pub fn parse_section_directory(bytes: &[u8], _config: &ParseConfig) -> Result<SectionDirectory> {
+pub fn parse_section_directory(bytes: &[u8], config: &ParseConfig) -> Result<SectionDirectory> {
     let header = read_header_data(bytes)?;
-    let page_map = read_page_map(bytes, &header)?;
-    let section_map = read_section_map(bytes, &header, &page_map)?;
+    let page_map = read_page_map(bytes, &header, config)?;
+    let section_map = read_section_map(bytes, &header, &page_map, config)?;
 
     let mut page_lookup = HashMap::with_capacity(page_map.len());
     for entry in page_map {
@@ -135,8 +134,8 @@ pub fn load_section_by_index<'a>(
     config: &ParseConfig,
 ) -> Result<SectionSlice<'a>> {
     let header = read_header_data(bytes)?;
-    let page_map = read_page_map(bytes, &header)?;
-    let section_map = read_section_map(bytes, &header, &page_map)?;
+    let page_map = read_page_map(bytes, &header, config)?;
+    let section_map = read_section_map(bytes, &header, &page_map, config)?;
     let section = section_map
         .get(index)
         .cloned()
@@ -670,8 +669,8 @@ fn dynamic_type_class_map_from_classes(classes: &[ClassEntry]) -> HashMap<u16, O
 
 fn load_named_section_data(bytes: &[u8], config: &ParseConfig, name: &str) -> Result<Vec<u8>> {
     let header = read_header_data(bytes)?;
-    let page_map = read_page_map(bytes, &header)?;
-    let section_map = read_section_map(bytes, &header, &page_map)?;
+    let page_map = read_page_map(bytes, &header, config)?;
+    let section_map = read_section_map(bytes, &header, &page_map, config)?;
 
     let mut page_lookup = HashMap::with_capacity(page_map.len());
     for entry in page_map {
@@ -716,7 +715,12 @@ fn read_header_data(bytes: &[u8]) -> Result<HeaderData> {
     })
 }
 
-fn read_system_section(bytes: &[u8], address: u64, expected_signature: u32) -> Result<Vec<u8>> {
+fn read_system_section(
+    bytes: &[u8],
+    address: u64,
+    expected_signature: u32,
+    config: &ParseConfig,
+) -> Result<Vec<u8>> {
     let offset = address as usize;
     if offset + 0x14 > bytes.len() {
         return Err(DwgError::new(
@@ -752,6 +756,15 @@ fn read_system_section(bytes: &[u8], address: u64, expected_signature: u32) -> R
     if header.compressed_size == 0 {
         return Ok(Vec::new());
     }
+    if u64::from(header.decompressed_size) > config.max_section_bytes {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            format!(
+                "system section size {} exceeds limit {}",
+                header.decompressed_size, config.max_section_bytes
+            ),
+        ));
+    }
     match header.compressed_type {
         0x02 => decompress_r18(data, header.decompressed_size as usize),
         _ => Err(DwgError::not_implemented(
@@ -760,12 +773,16 @@ fn read_system_section(bytes: &[u8], address: u64, expected_signature: u32) -> R
     }
 }
 
-fn read_page_map(bytes: &[u8], header: &HeaderData) -> Result<Vec<PageMapEntry>> {
+fn read_page_map(
+    bytes: &[u8],
+    header: &HeaderData,
+    config: &ParseConfig,
+) -> Result<Vec<PageMapEntry>> {
     let page_map_addr = header
         .section_page_map_address
         .checked_add(0x100)
         .ok_or_else(|| DwgError::new(ErrorKind::Format, "section page map address overflow"))?;
-    let data = read_system_section(bytes, page_map_addr, SECTION_PAGE_MAP_MAGIC)?;
+    let data = read_system_section(bytes, page_map_addr, SECTION_PAGE_MAP_MAGIC, config)?;
     let mut reader = ByteReader::new(&data);
     let mut page_address: u64 = 0x100;
     let mut entries = Vec::new();
@@ -799,6 +816,7 @@ fn read_section_map(
     bytes: &[u8],
     header: &HeaderData,
     page_map: &[PageMapEntry],
+    config: &ParseConfig,
 ) -> Result<Vec<SectionEntry>> {
     let section_map_page = page_map
         .iter()
@@ -806,29 +824,37 @@ fn read_section_map(
         .ok_or_else(|| {
             DwgError::new(ErrorKind::Format, "section map page not found in page map")
         })?;
-    let data = read_system_section(bytes, section_map_page.address, SECTION_MAP_MAGIC)?;
-    let mut reader = ByteReader::new(&data);
+    let data = read_system_section(bytes, section_map_page.address, SECTION_MAP_MAGIC, config)?;
+    parse_section_map_data(&data)
+}
+
+fn parse_section_map_data(data: &[u8]) -> Result<Vec<SectionEntry>> {
+    let mut reader = ByteReader::new(data);
     if reader.remaining() < 20 {
         return Err(DwgError::new(
             ErrorKind::Format,
             "section map header truncated",
         ));
     }
-    let header = SectionMapHeader {
-        section_entry_count: reader.read_u32_le()?,
-    };
+    let section_entry_count = reader.read_u32_le()? as usize;
     let _x02 = reader.read_u32_le()?;
     let _x00007400 = reader.read_u32_le()?;
     let _x00 = reader.read_u32_le()?;
     let _unknown = reader.read_u32_le()?;
 
-    let mut sections = Vec::with_capacity(header.section_entry_count as usize);
-    for _ in 0..header.section_entry_count {
-        if reader.remaining() < 88 {
+    if section_entry_count > reader.remaining() / SECTION_ENTRY_SIZE {
+        return Err(DwgError::new(
+            ErrorKind::Format,
+            "section count exceeds remaining section map data",
+        ));
+    }
+    let mut sections = Vec::with_capacity(section_entry_count);
+    for _ in 0..section_entry_count {
+        if reader.remaining() < SECTION_ENTRY_SIZE {
             return Err(DwgError::new(ErrorKind::Format, "section entry truncated"));
         }
         let size = reader.read_u64_le()?;
-        let page_count = reader.read_u32_le()?;
+        let page_count = reader.read_u32_le()? as usize;
         let max_decompressed_size = reader.read_u32_le()?;
         let _unknown = reader.read_u32_le()?;
         let compressed = reader.read_u32_le()?;
@@ -837,14 +863,14 @@ fn read_section_map(
         let name_bytes = reader.read_bytes(64)?;
         let name = read_cstring(name_bytes);
 
-        let mut pages = Vec::with_capacity(page_count as usize);
+        if page_count > reader.remaining() / SECTION_PAGE_INFO_SIZE {
+            return Err(DwgError::new(
+                ErrorKind::Format,
+                "page count exceeds remaining section map data",
+            ));
+        }
+        let mut pages = Vec::with_capacity(page_count);
         for _ in 0..page_count {
-            if reader.remaining() < 16 {
-                return Err(DwgError::new(
-                    ErrorKind::Format,
-                    "section page info truncated",
-                ));
-            }
             let page_id = reader.read_u32_le()?;
             let _data_size = reader.read_u32_le()?;
             let _start_offset = reader.read_u64_le()?;
@@ -1618,7 +1644,7 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
 
     // Set at each Handles-page boundary before first use (absolute first
     // handleoff/offset). Uninitialised until then avoids unused_assignments.
-    let mut last_handle: i64;
+    let mut last_handle: u64;
     let mut last_offset: i64;
     loop {
         if reader.remaining() < 2 {
@@ -1654,10 +1680,14 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
         while (reader.tell() - start) < (section_size as u64 - 2) {
             let prev_handle = last_handle;
             let prev_offset = last_offset;
-            last_handle += read_unsigned_modular_char(&mut reader)?;
+            let delta_handle = read_unsigned_modular_char(&mut reader)?;
+            last_handle = last_handle.checked_add(delta_handle).ok_or_else(|| {
+                DwgError::new(ErrorKind::Format, "AcDb:Handles handle overflow")
+                    .with_offset(reader.tell())
+            })?;
             last_offset += read_modular_char(&mut reader)?;
 
-            if last_handle < 0 || last_offset < 0 {
+            if last_offset < 0 {
                 if config.strict {
                     return Err(DwgError::new(
                         ErrorKind::Format,
@@ -1687,7 +1717,7 @@ fn parse_object_map_handles(bytes: &[u8], config: &ParseConfig) -> Result<Object
             }
 
             objects.push(ObjectRef {
-                handle: Handle(last_handle as u64),
+                handle: Handle(last_handle),
                 offset: last_offset as u32,
             });
 
@@ -1713,60 +1743,6 @@ fn read_u16_be(reader: &mut ByteReader<'_>) -> Result<u16> {
     let lo = reader.read_u8()? as u16;
     Ok((hi << 8) | lo)
 }
-
-/// Object-map handle offsets are unsigned modular chars: the ODA specification
-/// notes that "there is no negation used; handles in the object map are always
-/// in increasing order". Decoding them with the signed reader turned every
-/// terminating byte with bit 0x40 set into a negative delta, which shifted the
-/// handles of all following entries in that section (and dropped entries as
-/// "negative"), so objects were indexed under the wrong handles.
-fn read_unsigned_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
-    let mut value: i64 = 0;
-    let mut shift = 0;
-
-    for _ in 0..5 {
-        let byte = reader.read_u8()?;
-        value |= ((byte & 0x7F) as i64) << shift;
-        if (byte & 0x80) == 0 {
-            return Ok(value);
-        }
-        shift += 7;
-    }
-    Ok(value)
-}
-
-fn read_modular_char(reader: &mut ByteReader<'_>) -> Result<i64> {
-    let mut value: i64 = 0;
-    let mut shift = 0;
-
-    for _ in 0..4 {
-        let mut byte = reader.read_u8()?;
-        if (byte & 0x80) == 0 {
-            let negative = (byte & 0x40) != 0;
-            if negative {
-                byte &= 0xBF;
-            }
-            value |= (byte as i64) << shift;
-            if negative {
-                value = -value;
-            }
-            return Ok(value);
-        }
-        byte &= 0x7F;
-        value |= (byte as i64) << shift;
-        shift += 7;
-    }
-
-    Ok(value)
-}
-
-// Unsigned modular char (UMC) -- per LibreDWG's reference decoder
-// (src/decode.c:2572, read_2004_section_handles), the handle delta in each
-// object-map entry is read with this encoding, not the signed one below.
-// No sign bit: every byte's top bit is purely a continuation flag, and all
-// 7 remaining bits are magnitude, including in the final byte. Mirrors the
-// already-proven bit-level BitReader::read_umc (bit_reader.rs:322) at the
-// byte level.
 
 fn decompress_r18(src: &[u8], dst_size: usize) -> Result<Vec<u8>> {
     let mut dst = vec![0u8; dst_size];
@@ -1989,6 +1965,55 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join(path)
+    }
+
+    #[test]
+    fn section_count_must_fit_after_map_header() {
+        let mut data = [0u8; 20 + 96];
+        data[..4].copy_from_slice(&1u32.to_le_bytes());
+        let sections = parse_section_map_data(&data).unwrap();
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].pages.is_empty());
+
+        let err = parse_section_map_data(&data[..data.len() - 1]).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Format);
+        assert_eq!(
+            err.message,
+            "section count exceeds remaining section map data"
+        );
+    }
+
+    #[test]
+    fn page_count_must_fit_after_section_entry() {
+        let mut data = [0u8; 20 + 96 + 16];
+        data[..4].copy_from_slice(&1u32.to_le_bytes());
+        data[28..32].copy_from_slice(&1u32.to_le_bytes());
+        data[116..120].copy_from_slice(&7u32.to_le_bytes());
+        let sections = parse_section_map_data(&data).unwrap();
+        assert_eq!(sections[0].pages.len(), 1);
+        assert_eq!(sections[0].pages[0].page_id, 7);
+
+        let err = parse_section_map_data(&data[..data.len() - 1]).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Format);
+        assert_eq!(err.message, "page count exceeds remaining section map data");
+    }
+
+    #[test]
+    fn both_system_maps_respect_the_section_size_limit() {
+        let bytes = std::fs::read(fixture_path("test_dwg/line_2004.dwg")).expect("sample file");
+        let config = ParseConfig {
+            max_section_bytes: 1,
+            ..ParseConfig::default()
+        };
+        let err = parse_section_directory(&bytes, &config).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Format);
+        assert!(err.message.starts_with("system section size"));
+
+        let header = read_header_data(&bytes).unwrap();
+        let pages = read_page_map(&bytes, &header, &ParseConfig::default()).unwrap();
+        let err = read_section_map(&bytes, &header, &pages, &config).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Format);
+        assert!(err.message.starts_with("system section size"));
     }
 
     #[test]
@@ -2424,6 +2449,70 @@ mod tests {
             .collect();
         // Handle and offset both reset per Handles page.
         assert_eq!(refs, vec![(1, 10), (3, 14), (7, 8), (9, 11)]);
+    }
+
+    #[test]
+    fn parse_object_map_handles_reads_handle_deltas_longer_than_five_bytes() {
+        // Handles above 2^35 need a six-byte delta. Reading only five bytes
+        // left the sixth for the offset and shifted every later entry.
+        let bytes = vec![
+            0x00, 0x0B, // section_size = 11 (2 bytes header + 9 bytes payload)
+            0x9A, 0xF1, 0xD9, 0xA2, 0xA3, 0x02, // +0x12_3456_789A (six bytes)
+            0x0A, // +10
+            0x01, 0x04, // +1, +4
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator section
+        ];
+        let index = parse_object_map_handles(&bytes, &ParseConfig::default()).expect("index");
+        let refs: Vec<(u64, u32)> = index
+            .objects
+            .iter()
+            .map(|obj| (obj.handle.0, obj.offset))
+            .collect();
+        assert_eq!(refs, vec![(0x12_3456_789A, 10), (0x12_3456_789B, 14)]);
+    }
+
+    #[test]
+    fn parse_object_map_handles_reads_a_ten_byte_handle_delta() {
+        // A handle is unsigned 64-bit: one at or above 2^63 takes ten bytes.
+        let bytes = vec![
+            0x00, 0x0F, // section_size = 15 (2 bytes header + 13 bytes payload)
+            0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01, // +2^63
+            0x0A, // +10
+            0x01, 0x04, // +1, +4
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator section
+        ];
+        let index = parse_object_map_handles(&bytes, &ParseConfig::default()).expect("index");
+        let refs: Vec<(u64, u32)> = index
+            .objects
+            .iter()
+            .map(|obj| (obj.handle.0, obj.offset))
+            .collect();
+        assert_eq!(refs, vec![(1 << 63, 10), ((1 << 63) + 1, 14)]);
+    }
+
+    #[test]
+    fn parse_object_map_handles_rejects_a_handle_past_64_bits() {
+        let bytes = vec![
+            0x00, 0x0F, // section_size = 15 (2 bytes header + 13 bytes payload)
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, // +(2^64 - 1)
+            0x0A, // +10
+            0x01, 0x0A, // +1: past 64 bits
+            0x00, 0x00, // crc
+            0x00, 0x02, // terminator section
+        ];
+        let err = parse_object_map_handles(&bytes, &ParseConfig::default()).expect_err("overflow");
+        assert!(err.to_string().contains("AcDb:Handles handle overflow"));
+
+        // A tenth byte with more than bit 63 is too long.
+        let mut too_long = bytes.clone();
+        too_long[11] = 0x03;
+        let err =
+            parse_object_map_handles(&too_long, &ParseConfig::default()).expect_err("too long");
+        assert!(err
+            .to_string()
+            .contains("object map handle delta is too long"));
     }
 
     #[test]

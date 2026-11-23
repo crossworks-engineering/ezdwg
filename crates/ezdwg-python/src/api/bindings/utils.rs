@@ -119,6 +119,19 @@ fn acis_unknown_role_hint_from_type_code(type_code: u16, data_size: u32) -> &'st
     }
 }
 
+/// Largest coordinate a decoded LINE is taken at its word for.
+///
+/// Drawings in a national grid drawn in millimetres reach 1.5e8 (150 km from
+/// the origin of the zone), so the limit is well above that. Bytes read at a
+/// wrong bit offset come out with an arbitrary exponent, mostly far outside
+/// this range.
+const LINE_COORDINATE_LIMIT: f64 = 1.0e12;
+
+/// Smallest non-zero coordinate a decoded LINE is taken at its word for:
+/// rounding noise around zero is near 1e-16 times the size of the drawing,
+/// while bytes read at a wrong bit offset often come out as denormals.
+const LINE_COORDINATE_FLOOR: f64 = 1.0e-100;
+
 fn is_plausible_line_entity_candidate(entity: &entities::LineEntity) -> bool {
     let values = [
         entity.start.0,
@@ -128,16 +141,11 @@ fn is_plausible_line_entity_candidate(entity: &entities::LineEntity) -> bool {
         entity.end.1,
         entity.end.2,
     ];
-    if values.iter().any(|value| !value.is_finite()) {
-        return false;
-    }
-    let max_abs = values
-        .iter()
-        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
-    if max_abs > 1.0e8 {
-        return false;
-    }
-    true
+    values.iter().all(|value| {
+        value.is_finite()
+            && value.abs() <= LINE_COORDINATE_LIMIT
+            && (*value == 0.0 || value.abs() >= LINE_COORDINATE_FLOOR)
+    })
 }
 
 fn decode_attrib_like_entities_by_type<F>(
@@ -1434,10 +1442,11 @@ fn matches_type_name(
     builtin_name: &str,
     dynamic_types: &HashMap<u16, String>,
 ) -> bool {
-    // A class-based type (IMAGE, IMAGEDEF, WIPEOUT) has no code of its own:
-    // its callers pass 0, and only its class name matches. An object whose
-    // type code reads as 0 matches only when the class table of the drawing
-    // itself gives the code 0 that name, which a damaged table can do.
+    // A class-based type (IMAGE, IMAGEDEF, WIPEOUT, MULTILEADER) has no code
+    // of its own: its callers pass 0, and only its class name matches. An
+    // object whose type code reads as 0 matches only when the class table of
+    // the drawing itself gives the code 0 that name, which a damaged table
+    // can do.
     if builtin_code != 0 && type_code == builtin_code {
         return true;
     }
@@ -1445,15 +1454,6 @@ fn matches_type_name(
         .get(&type_code)
         .map(|name| name == builtin_name)
         .unwrap_or(false)
-}
-
-/// The first `limit` rows that were kept. A dropped row (`None`) does not
-/// count toward `limit`.
-fn kept_rows<R>(rows: Vec<Option<R>>, limit: Option<usize>) -> Vec<R> {
-    rows.into_iter()
-        .flatten()
-        .take(limit.unwrap_or(usize::MAX))
-        .collect()
 }
 
 fn matches_type_filter(filter: &HashSet<u16>, type_code: u16, resolved_name: &str) -> bool {
@@ -1495,30 +1495,21 @@ fn is_known_entity_type_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_plausible_attrib_entity, keeps_attrib_entity, kept_rows, matches_type_name,
-        resolve_r2010_string_stream_ranges,
+        is_plausible_attrib_entity, is_plausible_line_entity_candidate, keeps_attrib_entity,
+        matches_type_name, resolve_r2010_string_stream_ranges,
     };
     use crate::bit::{BitReader, BitWriter, Endian};
-    use crate::entities::{decode_attrib_exact, AttribEntity, StringStreamFormat};
+    use crate::entities::{decode_attrib_exact, AttribEntity, LineEntity, StringStreamFormat};
     use std::collections::HashMap;
 
     #[test]
-    fn limit_counts_the_kept_rows_only() {
-        let rows = || vec![None, Some(101), None, Some(102), Some(103)];
-        assert_eq!(kept_rows(rows(), Some(1)), vec![101]);
-        assert_eq!(kept_rows(rows(), Some(2)), vec![101, 102]);
-        assert_eq!(kept_rows(rows(), Some(0)), Vec::<i32>::new());
-        assert_eq!(kept_rows(rows(), None), vec![101, 102, 103]);
-    }
-
-    #[test]
     fn class_based_type_matches_on_its_class_name_only() {
-        let dynamic_types = HashMap::from([(500, "WIPEOUT".to_string())]);
-        assert!(matches_type_name(500, 0, "WIPEOUT", &dynamic_types));
-        assert!(!matches_type_name(500, 0, "IMAGE", &dynamic_types));
-        assert!(!matches_type_name(501, 0, "WIPEOUT", &dynamic_types));
+        let dynamic_types = HashMap::from([(500, "IMAGE".to_string())]);
+        assert!(matches_type_name(500, 0, "IMAGE", &dynamic_types));
+        assert!(!matches_type_name(500, 0, "IMAGEDEF", &dynamic_types));
+        assert!(!matches_type_name(501, 0, "IMAGE", &dynamic_types));
         // The type code of a damaged object can read as 0.
-        assert!(!matches_type_name(0, 0, "WIPEOUT", &dynamic_types));
+        assert!(!matches_type_name(0, 0, "IMAGE", &dynamic_types));
         // A built-in type matches on its code.
         assert!(matches_type_name(0x13, 0x13, "LINE", &dynamic_types));
     }
@@ -1603,6 +1594,55 @@ mod tests {
             lock_position: false,
             prompt: None,
         }
+    }
+
+    fn line_entity(start: (f64, f64, f64), end: (f64, f64, f64)) -> LineEntity {
+        LineEntity {
+            thickness: None,
+            extrusion: None,
+            handle: 0x10,
+            color_index: None,
+            true_color: None,
+            owner_handle: None,
+            layer_handle: 0,
+            start,
+            end,
+        }
+    }
+
+    #[test]
+    fn is_plausible_line_entity_candidate_accepts_a_national_grid_in_millimetres() {
+        // 150 km from the origin of the zone, drawn in millimetres
+        assert!(is_plausible_line_entity_candidate(&line_entity(
+            (-20_824_795.289, -145_633_812.653, 0.0),
+            (-20_725_395.861, -145_564_602.705, 0.0),
+        )));
+        assert!(is_plausible_line_entity_candidate(&line_entity(
+            (124_474_586.25, 257_567_213.03, 0.0),
+            (124_509_146.12, 257_582_063.03, 0.0),
+        )));
+        // rounding noise around zero is a real coordinate
+        assert!(is_plausible_line_entity_candidate(&line_entity(
+            (6.1e-17, 0.0, 0.0),
+            (10.0, -1.2e-14, 0.0),
+        )));
+    }
+
+    #[test]
+    fn is_plausible_line_entity_candidate_rejects_bytes_read_at_a_wrong_offset() {
+        // what the 26 bytes of a far-out LINE read without its type prefix gave
+        assert!(!is_plausible_line_entity_candidate(&line_entity(
+            (1.0, 1.0, 0.0),
+            (0.0, 9.578491027143785e-168, 0.0),
+        )));
+        assert!(!is_plausible_line_entity_candidate(&line_entity(
+            (1.0e13, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        )));
+        assert!(!is_plausible_line_entity_candidate(&line_entity(
+            (f64::NAN, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        )));
     }
 
     #[test]

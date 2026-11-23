@@ -94,6 +94,35 @@ fn collect_entity_rows<E, R, F>(
 where
     F: FnMut(E) -> R,
 {
+    collect_kept_entity_rows(
+        path,
+        limit,
+        type_code,
+        type_name,
+        decode_for_version,
+        |entity| Some(build_row(entity)),
+    )
+}
+
+// `collect_entity_rows` for a `build_row` that can drop an entity (`None`).
+// `limit` counts the rows that are kept, so a dropped entity does not use it
+// up, and the walk stops at it.
+fn collect_kept_entity_rows<E, R, F>(
+    path: &str,
+    limit: Option<usize>,
+    type_code: u16,
+    type_name: &'static str,
+    decode_for_version: fn(
+        &mut BitReader<'_>,
+        &version::DwgVersion,
+        &ApiObjectHeader,
+        u64,
+    ) -> crate::core::result::Result<E>,
+    mut build_row: F,
+) -> PyResult<Vec<R>>
+where
+    F: FnMut(E) -> Option<R>,
+{
     let shared = decoded_file(path)?;
     let decoder = shared.decoder()?;
     let best_effort = shared.best_effort;
@@ -126,7 +155,10 @@ where
                 Err(_) if best_effort => continue,
                 Err(err) => return Err(to_py_err(err)),
             };
-        result.push(build_row(entity));
+        let Some(row) = build_row(entity) else {
+            continue;
+        };
+        result.push(row);
         if let Some(limit) = limit {
             if result.len() >= limit {
                 break;
@@ -170,12 +202,17 @@ pub fn read_section_bytes(path: &str, index: usize) -> PyResult<Vec<u8>> {
     Ok(section.data.as_ref().to_vec())
 }
 
-#[pyfunction]
-pub fn decode_header_variables(path: &str) -> PyResult<HeaderVariablesRow> {
+/// Preserve the original eleven-element row unless XCLIPFRAME is requested.
+#[pyfunction(signature = (path, *, include_xclipframe=false))]
+pub fn decode_header_variables(
+    py: Python<'_>,
+    path: &str,
+    include_xclipframe: bool,
+) -> PyResult<PyObject> {
     let bytes = file_open::read_file(path).map_err(to_py_err)?;
     let decoder = build_decoder(&bytes).map_err(to_py_err)?;
     let vars = decoder.header_variables().map_err(to_py_err)?;
-    Ok((
+    let row: HeaderVariablesRow = (
         vars.insunits,
         vars.lunits,
         vars.luprec,
@@ -187,7 +224,21 @@ pub fn decode_header_variables(path: &str) -> PyResult<HeaderVariablesRow> {
         vars.extmax,
         vars.limmin,
         vars.limmax,
-    ))
+    );
+    let row: PyObject = row.into_py(py);
+    if !include_xclipframe {
+        return Ok(row);
+    }
+    let mut values: Vec<PyObject> = row
+        .bind(py)
+        .downcast::<pyo3::types::PyTuple>()?
+        .iter()
+        .map(|item| item.unbind())
+        .collect();
+    values.push(vars.xclipframe.into_py(py));
+    Ok(pyo3::types::PyTuple::new_bound(py, values)
+        .into_any()
+        .unbind())
 }
 
 #[pyfunction(signature = (path, limit=None))]
@@ -1911,7 +1962,7 @@ fn parse_proxy_graphic_chunk_infos(data: &[u8]) -> Vec<(u32, u32)> {
     out
 }
 
-/// Which layout of the saved picture a DWG version has. `None`: not read
+/// Which layout of the proxy graphic a DWG version has. `None`: not read
 /// (R13 and unknown versions: no record of them was studied).
 fn proxy_graphic_layout(
     version: &version::DwgVersion,
@@ -1929,7 +1980,7 @@ fn proxy_graphic_layout(
     }
 }
 
-/// The saved picture of the entity record of `handle`. A record that holds
+/// The proxy graphic of the entity record of `handle`. A record that holds
 /// another handle is refused: the read is then out of step with the record.
 fn entity_proxy_graphic(
     record: &objects::ObjectRecord<'_>,
@@ -1939,7 +1990,7 @@ fn entity_proxy_graphic(
 ) -> crate::core::result::Result<Option<Vec<u8>>> {
     let mut reader = record.bit_reader();
     skip_object_type_prefix(&mut reader, version)?;
-    let (record_handle, picture) =
+    let (record_handle, graphic) =
         entities::common::read_entity_proxy_graphic(&mut reader, layout)?;
     if record_handle != handle {
         return Err(DwgError::new(
@@ -1947,29 +1998,34 @@ fn entity_proxy_graphic(
             format!("the record of handle {handle:#X} holds the handle {record_handle:#X}"),
         ));
     }
-    Ok(picture)
+    Ok(graphic)
 }
 
-/// The saved picture (proxy graphic) of entities, by handle: the bytes an
-/// application stored in the record so that a program without the code of
-/// the entity can still draw it. R14 to R2018; R13 is not read.
+/// The proxy graphic of entities, by handle: the bytes an application stored
+/// in the record so that a program without the code of the entity can still
+/// draw it. R14 to R2018; R13 is not read.
 ///
 /// One row `(handle, bytes)` for each handle asked, in the order asked, whose
 /// record is an entity and reads. The bytes are `None` when the entity has no
-/// saved picture. They are returned as stored and are not looked into.
+/// proxy graphic. They are returned as stored and are not looked into. The
+/// read stops after `limit` rows, as in `read_object_records_by_handle`.
 ///
 /// A handle with no row was not read: it is not in the drawing, it is not an
-/// entity, or its record is damaged (the picture runs past the end of the
-/// record, or the record holds another handle). Best effort leaves such a
+/// entity, or its record is damaged (the proxy graphic runs past the end of
+/// the record, or the record holds another handle). Best effort leaves such a
 /// handle out, so the caller counts them as the handles asked less the rows;
 /// without best effort a damaged record raises.
-#[pyfunction(signature = (path, handles))]
+///
+/// Each call builds its table of handles over all objects of the drawing, so
+/// ask the handles of one drawing in one call.
+#[pyfunction(signature = (path, handles, limit=None))]
 pub fn decode_entity_proxy_graphics(
     py: Python<'_>,
     path: &str,
     handles: Vec<u64>,
+    limit: Option<usize>,
 ) -> PyResult<Vec<EntityProxyGraphicRow>> {
-    if handles.is_empty() {
+    if handles.is_empty() || limit == Some(0) {
         return Ok(Vec::new());
     }
     let shared = decoded_file(path)?;
@@ -1981,7 +2037,7 @@ pub fn decode_entity_proxy_graphics(
         }
         return Err(to_py_err(DwgError::new(
             ErrorKind::Unsupported,
-            "the saved picture of an entity is not read before R14",
+            "the proxy graphic of an entity is not read for this DWG version",
         )));
     };
     // As `read_object_records_by_handle`: the last record of a handle counts.
@@ -2007,12 +2063,17 @@ pub fn decode_entity_proxy_graphics(
             continue;
         }
         match entity_proxy_graphic(&record, decoder.version(), layout, handle) {
-            Ok(picture) => result.push((
+            Ok(graphic) => result.push((
                 handle,
-                picture.map(|bytes| pyo3::types::PyBytes::new_bound(py, &bytes).unbind()),
+                graphic.map(|bytes| pyo3::types::PyBytes::new_bound(py, &bytes).unbind()),
             )),
             Err(_) if best_effort => continue,
             Err(err) => return Err(to_py_err(err)),
+        }
+        if let Some(limit) = limit {
+            if result.len() >= limit {
+                break;
+            }
         }
     }
     Ok(result)
@@ -4755,34 +4816,39 @@ pub fn decode_image_entities(path: &str, limit: Option<usize>) -> PyResult<Vec<I
 
 /// WIPEOUT entities. The record is the one of IMAGE (see `entities::image`):
 /// there is no image definition, and the clip boundary is the masked area.
+/// The row is the IMAGE row without the two handles at its end, and with the
+/// clip mode (R2010 and later) in their place.
 ///
 /// Best effort drops a WIPEOUT whose frame or boundary holds a number that
 /// is not finite. `limit` counts the rows that are returned, so a dropped
-/// record does not use it up; every WIPEOUT record is read for that.
+/// record does not use it up.
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_wipeout_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<WipeoutEntityRow>> {
+    if limit == Some(0) {
+        return Ok(Vec::new());
+    }
     let best_effort = decoded_file(path)?.best_effort;
-    let rows = collect_entity_rows(path, None, 0, "WIPEOUT", decode_image_for_version, |e| {
-        (!best_effort || e.has_finite_numbers()).then(|| {
-            (
-                e.handle,
-                e.insert,
-                e.u_vector,
-                e.v_vector,
-                e.size,
-                e.display_props,
-                e.clipping,
-                (e.brightness, e.contrast, e.fade),
-                e.clip_type,
-                e.clip_mode,
-                e.clip_vertices,
-            )
-        })
-    })?;
-    Ok(kept_rows(rows, limit))
+    collect_kept_entity_rows(path, limit, 0, "WIPEOUT", decode_image_for_version, |e| {
+        if best_effort && !e.has_finite_numbers() {
+            return None;
+        }
+        Some((
+            e.handle,
+            e.insert,
+            e.u_vector,
+            e.v_vector,
+            e.size,
+            e.display_props,
+            e.clipping,
+            (e.brightness, e.contrast, e.fade),
+            e.clip_type,
+            e.clip_vertices,
+            e.clip_mode,
+        ))
+    })
 }
 
 /// MULTILEADER entities: a leader whose label is a text or a block. See
@@ -4791,22 +4857,24 @@ pub fn decode_wipeout_entities(
 ///
 /// Best effort leaves out a record that does not decode, and drops a
 /// MULTILEADER that holds a number that is not finite. `limit` counts the
-/// rows that are returned; every MULTILEADER record is read for that.
+/// rows that are returned, so a dropped record does not use it up.
 #[pyfunction(signature = (path, limit=None))]
 pub fn decode_mleader_entities(
     path: &str,
     limit: Option<usize>,
 ) -> PyResult<Vec<MLeaderEntityRow>> {
+    if limit == Some(0) {
+        return Ok(Vec::new());
+    }
     let best_effort = decoded_file(path)?.best_effort;
-    let rows = collect_entity_rows(
+    collect_kept_entity_rows(
         path,
-        None,
+        limit,
         0,
         "MULTILEADER",
         decode_mleader_for_version,
         |e| (!best_effort || e.has_finite_numbers()).then(|| mleader_row(e)),
-    )?;
-    Ok(kept_rows(rows, limit))
+    )
 }
 
 fn mleader_row(e: entities::MLeaderEntity) -> MLeaderEntityRow {
@@ -6084,4 +6152,126 @@ mod read_tu_bounded_tests {
             }
         }
     }
+}
+
+/// The boundary paths of every HATCH, before flattening: `(handle, [path])`, where a path is
+/// `("polyline", closed, vertices, bulges)` (bulges empty when none are stored) or `("edges", [edge])` with
+/// an edge `("line", start, end)`, `("arc", center, radius, start_angle, end_angle, ccw)`,
+/// `("ellipse", center, major_axis, ratio, start_angle, end_angle, ccw)` or a spline definition;
+/// angles are in radians. Spline rows retain degree, rational and periodic flags,
+/// knots, control points, weights, fit points and optional start/end tangents.
+/// A record that does not decode is left out in best-effort mode.
+#[pyfunction]
+pub fn decode_hatch_boundaries(py: Python<'_>, path: &str) -> PyResult<Vec<(u64, Vec<PyObject>)>> {
+    let shared = decoded_file(path)?;
+    let decoder = shared.decoder()?;
+    let dynamic_types = &shared.dynamic_types;
+    let best_effort = shared.best_effort;
+    let mut result = Vec::new();
+    for obj in decoder
+        .matching_objects(&shared.index, best_effort, |candidate_type| {
+            matches_type_name(candidate_type, 0x4E, "HATCH", dynamic_types)
+        })
+        .iter()
+    {
+        let Some((record, header)) = parse_record_and_header(&decoder, obj.offset, best_effort)?
+        else {
+            continue;
+        };
+        if !matches_type_name(header.type_code, 0x4E, "HATCH", dynamic_types) {
+            continue;
+        }
+        let mut reader = record.bit_reader();
+        if let Err(err) = skip_object_type_prefix(&mut reader, decoder.version()) {
+            if best_effort {
+                continue;
+            }
+            return Err(to_py_err(err));
+        }
+        let entity =
+            match decode_hatch_for_version(&mut reader, decoder.version(), &header, obj.handle.0) {
+                Ok(entity) => entity,
+                Err(_) if best_effort => continue,
+                Err(err) => return Err(to_py_err(err)),
+            };
+        let mut paths: Vec<PyObject> = Vec::with_capacity(entity.paths.len());
+        for hatch_path in &entity.paths {
+            let row = match &hatch_path.boundary {
+                entities::HatchBoundary::Polyline {
+                    closed,
+                    vertices,
+                    bulges,
+                } => ("polyline", *closed, vertices.clone(), bulges.clone()).into_py(py),
+                entities::HatchBoundary::Edges(edges) => {
+                    let mut rows: Vec<PyObject> = Vec::with_capacity(edges.len());
+                    for edge in edges {
+                        rows.push(match edge {
+                            entities::HatchEdge::Line { start, end } => {
+                                ("line", *start, *end).into_py(py)
+                            }
+                            entities::HatchEdge::Arc {
+                                center,
+                                radius,
+                                start_angle,
+                                end_angle,
+                                counter_clockwise,
+                            } => (
+                                "arc",
+                                *center,
+                                *radius,
+                                *start_angle,
+                                *end_angle,
+                                *counter_clockwise,
+                            )
+                                .into_py(py),
+                            entities::HatchEdge::Ellipse {
+                                center,
+                                major_axis,
+                                ratio,
+                                start_angle,
+                                end_angle,
+                                counter_clockwise,
+                            } => (
+                                "ellipse",
+                                *center,
+                                *major_axis,
+                                *ratio,
+                                *start_angle,
+                                *end_angle,
+                                *counter_clockwise,
+                            )
+                                .into_py(py),
+                            entities::HatchEdge::Spline {
+                                degree,
+                                rational,
+                                periodic,
+                                knots,
+                                control_points,
+                                weights,
+                                fit_points,
+                                start_tangent,
+                                end_tangent,
+                            } => (
+                                "spline",
+                                *degree,
+                                *rational,
+                                *periodic,
+                                knots.clone(),
+                                control_points.clone(),
+                                weights.clone(),
+                                fit_points.clone(),
+                                *start_tangent,
+                                *end_tangent,
+                            )
+                                .into_py(py),
+                        });
+                    }
+                    ("edges", rows).into_py(py)
+                }
+            };
+            paths.push(row);
+        }
+        result.push((entity.handle, paths));
+    }
+    Ok(result)
 }

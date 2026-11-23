@@ -282,8 +282,9 @@ names another object (a style, a linetype, a text style, a block record, an
 attribute definition); 0 is no object. A color is `(color index, value)`: the
 value is the 32-bit number a DXF file shows for it, and 0 in R2000, which
 stores the color index only. Points and directions are in world coordinates,
-as a DXF file of the drawing shows them. That was checked for objects in the
-XY plane only: no object of the evidence lies in another plane.
+as a DXF file of the drawing shows them; that is checked for objects in the
+XY plane only. A `rotation` is in radians, as in the DXF MULTILEADER, where
+TEXT, INSERT and SHAPE give degrees.
 
 | Key | Type | Description |
 |-----|------|-------------|
@@ -318,8 +319,8 @@ XY plane only: no object of the evidence lies in another plane.
 | `plane_origin` / `plane_x_axis` / `plane_y_axis` | `(float, float, float)` | The plane of the object |
 | `plane_normal_reversed` | `bool` | As stored |
 | `leaders` | `list[dict]` | See below |
-| `text` | `dict \| None` | The text label: `text` (with its MTEXT format codes), `location`, `direction`, `rotation`, `width`, `normal`, `style_handle`, `color`, `attachment`, `drawing_direction`, `background_color`, `background_scale`, `background_on` |
-| `block` | `dict \| None` | The block label: `block_handle`, `location`, `scale`, `rotation`, `normal`, `color`, `matrix` (16 values, in the order of the DXF group 47) |
+| `text` | `dict \| None` | The text label: `text` (with its MTEXT format codes), `location`, `direction`, `rotation` (radians, as in the DXF MULTILEADER), `width`, `normal`, `style_handle`, `color`, `attachment`, `drawing_direction`, `background_color`, `background_scale`, `background_on` |
+| `block` | `dict \| None` | The block label: `block_handle`, `location`, `scale`, `rotation` (radians, as in the DXF MULTILEADER), `normal`, `color`, `matrix` (16 values, in the order of the DXF group 47) |
 
 Each of `leaders`:
 
@@ -336,21 +337,18 @@ Each of `leaders`:
 A leader line runs from its `points` to the `last_point` of its leader. That
 is the DXF form of the entity; no test of this library draws a leader line.
 
-How far this is proven: the layout was found by comparing records with what
-an independent reader prints for them, on one sample drawing in six versions
-(15 objects each) and on 964 objects of production drawings (R2013 and
-R2018). Every one of them has one leader with one line of one point, and
-every block label has one attribute. More leaders, lines, points and
-attributes are read as a repeat. For attributes nothing checks the repeat:
-an attribute takes its definition handle, its numbers and its text from
-three streams of the record, and with two attributes or more a wrong pairing
-of those parts would not be seen. A block label was compared on the R2013
-and R2018 production drawings only; the sample drawing has none, so for the
-older versions it is read on records that the tests build. A record with a
-break in a leader or in a leader line, with a text column height, or, before
-R2010, with an entry in the two lists at its end is not returned: no drawing
-shows how those items are stored. `ezdwg inspect` counts such a record under
-`decode_gap[MULTILEADER]`.
+Limits:
+
+- More than one leader, line, point or block attribute is read as a repeat
+  of the first. No drawing at hand has two, so the repeat is not proven. For
+  attributes nothing checks that the handle, the numbers and the text of one
+  attribute belong together.
+- The contributor compared block labels for R2013 and R2018 on private
+  drawings. Public block-label tests use constructed records. Before R2013
+  the drawing evidence is one public sample with text labels only.
+- A record with a break in a leader or in a leader line, with a text column
+  height, or (before R2010) with an entry in the two lists at its end is not
+  returned. `ezdwg inspect` counts it under `decode_gap[MULTILEADER]`.
 
 ### SPLINE
 
@@ -431,42 +429,37 @@ Every sheet has one viewport that stands for the sheet itself: the first of
 `Document.layouts()[name]["viewport_handles"]`. Its view shows the sheet at
 scale 1.
 
-## Saved Picture of an Entity
+## Proxy Graphic of an Entity
 
-An application can store a picture of an entity in its record (a proxy
-graphic), so that a program without the code of that entity can still draw
-it. Entities of a class, such as MULTILEADER, ACAD_TABLE, MESH, IMAGE,
-WIPEOUT and an underlay, often carry one.
-`raw.decode_entity_proxy_graphics` returns those bytes by handle:
+An application can store a proxy graphic in the record of an entity, so that
+a program without the code of that entity can still draw it. Entities of a
+class, such as MULTILEADER, ACAD_TABLE, MESH, IMAGE, WIPEOUT and an underlay,
+often carry one. `raw.decode_entity_proxy_graphics` returns those bytes by
+handle:
 
 ```python
 handles = [entity.handle for entity in doc.entities().query("MULTILEADER")]
-for handle, picture in ezdwg.raw.decode_entity_proxy_graphics("drawing.dwg", handles):
-    if picture is None:
-        ...  # the entity has no saved picture
+for handle, graphic in ezdwg.raw.decode_entity_proxy_graphics("drawing.dwg", handles):
+    if graphic is None:
+        ...  # the entity has no proxy graphic
 ```
 
 - There is one row for each handle asked whose record is an entity and
-  reads, in the order asked.
+  reads, in the order asked. `limit` stops the read after that many rows;
+  `limit=0` returns no rows.
 - The bytes are returned as stored: they are the bytes a DXF file of the
   drawing carries as the proxy graphic of the entity. The function does not
   look into them.
 - A handle with no row was not read: it is not in the drawing, it is not an
-  entity, or its record is damaged (the picture runs past the end of the
-  record, or the record holds another handle than the one asked). The
+  entity, or its record is damaged (the proxy graphic runs past the end of
+  the record, or the record holds another handle than the one asked). The
   handles asked less the rows returned is the count of those.
-- DWG versions R14 to R2018. R13 is not read, and gives no rows.
-
-How far this is proven: the place of the picture in the record was found by
-comparing the bytes with the proxy graphic that an independent reader writes
-into a DXF file for the same entity. On the sample drawing of
-`test_dwg/acadsharp` the bytes are equal for 20 entities in each of R2000,
-R2007, R2010, R2013 and R2018. That reader gives no proxy graphic for the
-R2004 sample and only one for the R14 sample (equal); there the pictures of
-5 entities equal the bytes of the same entities in R2000, and the pictures
-of the 15 MULTILEADER have the same lengths as in R2000. On 1,279 production
-drawings (R2013 and R2018) all 26,074 saved pictures (964 MULTILEADER, 25,110
-WIPEOUT) equal that reader's bytes.
+- DWG versions R14 to R2018. R13 is not read, and gives no rows. Public
+  tests use one sample drawing per version; the contributor also reports
+  comparisons on private production drawings for R2013 and R2018.
+- Each call builds its table of handles over all objects of the drawing, so
+  ask the handles of one drawing in one call. One proxy graphic is at most
+  as large as its record; the sum of a call has no limit of its own.
 
 !!! note "ARC Angles"
     The high-level API returns ARC angles in **degrees**. The raw API (`ezdwg.raw`) returns angles in **radians**.
